@@ -1364,8 +1364,10 @@ getTracesForPred ::
   EquivM sym arch (Maybe (CE.TraceEvents sym arch), Maybe (CE.TraceEvents sym arch))
 getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
-  p_pretty <- PSi.applySimpStrategy PSi.prettySimplifier p
-  withTracing @"expr" (Some p_pretty) $ do
+  withTracing @"expr" (Some p) $ do
+    withTracing @"message" "Simplified Condition" $ withForkedSolver_ $ do
+      p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
+      emitTrace @"expr" (Some p_pretty)
     mtraceT <- withTracing @"message" "With condition assumed" $ 
       withSatAssumption (PAS.fromPred p) $ do
         traceT <- getSomeGroundTrace scope bundle dom Nothing
@@ -1478,7 +1480,8 @@ withSimBundle ::
   EquivM sym arch a
 withSimBundle pg vars node f = do
   bundle0 <- mkSimBundle pg node vars
-  bundle1 <- PSi.applySimpStrategy PSi.coreStrategy bundle0
+  let bundle1 = bundle0
+  --bundle1 <- withTracing @"debug" "simpBundle" $ PSi.applySimpStrategy PSi.coreStrategy bundle0
   bundle <- applyCurrentAsms bundle1
   emitTrace @"bundle" (Some bundle)
   f bundle

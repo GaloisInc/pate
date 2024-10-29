@@ -103,15 +103,22 @@ module Pate.Monad
   , fnTrace
   , getWrappedSolver
   , joinPatchPred
+  , withSharedEnvEmit
   , module PME
-  , atPriority, currentPriority, thisPriority)
+  , atPriority, currentPriority, thisPriority
+  , concretizeWithSolverBatch 
+  , withFreshSolver
+  , forkBins
+  , withForkedSolver
+  , withForkedSolver_
+  )
   where
 
 import           GHC.Stack ( HasCallStack, callStack )
 
 import           Control.Lens ( (&), (.~) )
 import qualified Control.Monad.Fail as MF
-import           Control.Monad (void)
+import           Control.Monad (void, forM)
 import           Control.Monad.IO.Class (liftIO)
 import qualified Control.Monad.IO.Unlift as IO
 import qualified Control.Concurrent as IO
@@ -120,6 +127,7 @@ import           Control.Monad.Catch
 import qualified Control.Monad.Reader as CMR
 import           Control.Monad.Reader ( asks, ask )
 import           Control.Monad.Except
+import           Control.Monad.State (StateT(..), get, put, evalStateT, modify, execStateT)
 
 import           Data.Maybe ( fromMaybe )
 import qualified Data.Map as M
@@ -160,6 +168,7 @@ import qualified What4.Expr as WE
 import qualified What4.Expr.GroundEval as W4G
 import qualified What4.Expr.Builder as W4B
 import qualified What4.Interface as W4
+import qualified What4.Concrete as W4
 import qualified What4.SatResult as W4R
 import qualified What4.Symbol as WS
 import           What4.Utils.Process (filterAsync)
@@ -197,6 +206,13 @@ import Data.Functor.Const (Const(..))
 import Unsafe.Coerce (unsafeCoerce)
 import Debug.Trace
 import Data.List
+import Data.Parameterized.SymbolRepr
+import qualified What4.JSON as W4S
+import qualified Data.Aeson as JSON
+import qualified Data.Aeson.Text as JSON
+import qualified GHC.IO.Unsafe as IO
+import qualified Data.Parameterized.TraversableFC as TFC
+import qualified What4.Utils.AbstractDomains as W4AD
 
 atPriority :: 
   NodePriority ->
@@ -402,7 +418,73 @@ printExprTruncated (ExprLabel lbl) (Some e) =
     [] -> pfx
     [a] -> pfx <> PP.pretty a
     (a:as) -> pfx <> PP.pretty a <> ".." <> PP.pretty (last as)
-              
+
+type IsSerializableNode sym arch nm = (IsTraceNode '(sym, arch) nm, W4S.W4Serializable sym (TraceNodeLabel nm), W4S.W4Serializable sym (TraceNodeType '(sym, arch) nm))
+
+data W4SerializableNode sym arch nm = IsSerializableNode sym arch nm => 
+  W4SerializableNode (SymbolRepr nm) (TraceNodeLabel nm) (TraceNodeType '(sym, arch) nm)
+
+-- | List of trace nodes (of any type) that share the same expression binding
+--   environment when serialized
+data SharedExprEnv sym arch = SharedExprEnv sym [Some (W4SerializableNode sym arch)]
+
+instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "shared_env" where
+  type TraceNodeType '(sym,arch) "shared_env" = SharedExprEnv sym arch
+  type TraceNodeLabel "shared_env" = String
+
+  prettyNode top_lbl (SharedExprEnv _ nds) =
+    PP.vsep $ (PP.pretty top_lbl <> ": "):(map (\(Some (W4SerializableNode (_ :: SymbolRepr nm) lbl nd)) -> prettyNode @_ @'(sym,arch) @nm lbl nd) nds)
+
+  jsonNode sym top_lbl (SharedExprEnv _ nds) = do
+    (\f -> evalStateT f W4S.emptyExprCache) $ do
+      contents <- forM nds $ \(Some (W4SerializableNode nm lbl nd)) -> do
+        cache0 <- get
+        (lbl_json, cache1) <- liftIO $ W4S.w4ToJSONWithCache sym cache0 lbl
+        (nd_json, cache2) <- liftIO $ W4S.w4ToJSONWithCache sym cache1 nd
+        put cache2
+        return $ JSON.object [ "type" JSON..= symbolRepr nm, "label" JSON..= lbl_json, "value" JSON..= nd_json ]
+      cache <- get
+      env <- liftIO $ W4S.cacheToEnv sym cache
+      env_json <- liftIO $ W4S.serializeExprEnv sym env
+      return $ JSON.object [ "name" JSON..= top_lbl, "shared_env" JSON..= env_json, "contents" JSON..= contents]
+
+  nodeTags = [(Summary, prettyNode @_ @'(sym,arch) @"shared_env")
+              -- fixme: quick hack to get JSON out without needing to run the entire
+              -- toplevel in JSON mode. Ideally this would be something that the Repl could
+              -- do itself.
+              , ("JSON", \top_lbl env@(SharedExprEnv sym _) ->
+                  let v = IO.unsafePerformIO $ jsonNode @_ @'(sym,arch) @"shared_env" sym top_lbl env
+                  in PP.pretty $ JSON.encodeToLazyText v)
+              , (Simplified, \top_lbl _ -> PP.pretty top_lbl)
+             ]
+
+
+-- | Emit multiple values to the tracetree with a common expression binding environment
+--   This will ultimately result in a single composite value, where all of the given values are serialized
+--   using the same expression binding cache.
+--
+--
+--   FIXME: this is a bit of a gross hack to work around the fact that we can't supply
+--   an expression binding environment when emitting a value via 'emitTrace'.
+--   What we need is a common datatype for expression binding environments that both
+--   TraceTree and W4Serializable use so we can do this more sensibly (i.e. have a IsTreeBuilder primitive that
+--   collects all of the inner traces and builds a common binding environment from them)
+--
+--   For now we can at least abstract away the details of this packaging by just taking
+--   an arbitrary monadic operation that collects the individual traces.
+
+withSharedEnvEmit ::
+  forall sym arch.
+  String ->
+  (forall m. Monad m => (forall nm. (IsSerializableNode sym arch nm) => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> m ()) -> m ()) ->
+  EquivM sym arch ()
+withSharedEnvEmit top_nm f = withSym $ \sym -> do
+  env <- execStateT (f g) (SharedExprEnv sym [])
+  emitTraceLabel @"shared_env" @'(sym,arch) top_nm env
+  where 
+    g :: forall (nm :: Symbol). IsSerializableNode sym arch nm => SymbolRepr nm -> TraceNodeLabel nm -> TraceNodeType '(sym,arch) nm -> StateT (SharedExprEnv sym arch) (EquivM_ sym arch) ()
+    g nm lbl v = modify $ \(SharedExprEnv sym vs) -> SharedExprEnv sym ((Some (W4SerializableNode nm lbl v)):vs)
+
 withBinary ::
   forall bin sym arch a.
   PBi.KnownBinary bin =>
@@ -949,7 +1031,157 @@ getWrappedSolver = withSym $ \sym -> do
         case r of
           Left _err -> safeIO PEE.SolverError $ k W4R.Unknown
           Right a -> return a
+
+
+-- | Mapping from expressions to (maybe) concrete values
+--   If an expression is missing from the map, it may be symbolic or concrete.
+--   If an expression is present in the map with a concrete value, this value *may* hold in all cases
+--   If an expression is present in the map with a 'Nothing' entry, it is considered symbolic
+--   (either proven to have multiple models or assumed symbolic due to timeout)
+--   FIXME: includes path condition predicate which is used internally by 'concretizeWithSolverGen'
+--   but should be factored out.
+data ConcreteMap sym = 
+    ConcreteMap (MapF.MapF (W4.SymExpr sym) (PPa.LiftF Maybe W4.ConcreteVal)) (W4.Pred sym)
+
+emptyConcreteMap :: EquivM sym arch (ConcreteMap sym)
+emptyConcreteMap = withSym $ \sym -> return (ConcreteMap MapF.empty (W4.truePred sym))
+
+-- | Use the given 'ConcreteMap' to concretize an expression. Returns the original expression
+--   if it is known to be symbolic, the concretized expression if it is in the map, or 'Nothing' if
+--   it is not in the map.
+concretizeWithMap ::
+  ConcreteMap sym ->
+  W4.SymExpr sym tp ->
+  EquivM sym arch (Maybe (W4.SymExpr sym tp))
+concretizeWithMap (ConcreteMap cm _) e = withSym $ \sym -> case MapF.lookup e cm of
+  Just (PPa.LiftF (Just c)) -> Just <$> (IO.liftIO $ W4.concreteToSym sym c)
+  Just (PPa.LiftF Nothing) -> return $ Just e
+  Nothing -> return Nothing
+
+concretizeOne ::
+  W4.SymExpr sym tp ->
+  ConcreteMap sym ->
+  EquivM sym arch (W4.SymExpr sym tp, ConcreteMap sym)
+concretizeOne e (ConcreteMap cm p) = do
+  e' <- concretizeWithSolver e
+  case W4.asConcrete e' of
+    Just c -> return $ (e', ConcreteMap (MapF.insert e (PPa.LiftF (Just c)) cm) p)
+    Nothing -> return $ (e, ConcreteMap (MapF.insert e (PPa.LiftF Nothing) cm) p)
+
+concretizeWithSolverGen' ::
+  forall sym arch ctx.
+  ConcreteMap sym ->
+  Ctx.Assignment (W4.SymExpr sym) ctx ->
+  EquivM sym arch (Ctx.Assignment (W4.SymExpr sym) ctx, ConcreteMap sym)
+concretizeWithSolverGen' cm_outer (Ctx.Empty Ctx.:> e) =  do
+  (e', cm) <- concretizeOne e cm_outer
+  return $ (Ctx.Empty Ctx.:> e', cm)
+concretizeWithSolverGen' cm_outer a = withSym $ \sym -> do
+  let
+    go :: forall tp. SymGroundEvalFn sym -> W4.SymExpr sym tp -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym)
+    go evalFn e (ConcreteMap m p) = case W4.asConcrete e of
+      -- value is already concrete, nothing to do
+      Just{} -> return (ConcreteMap m p) 
+      Nothing -> (W4.asConcrete <$> concretizeWithModel evalFn e) >>= \case
+        -- failed to concretize with this model, so we'll conservatively mark this
+        -- as symbolic
+        Nothing -> return $ ConcreteMap (MapF.insert e (PPa.LiftF Nothing) m) p
+        Just conc1 -> do
+          conc1_as_sym <- IO.liftIO $ W4.concreteToSym sym conc1
+          e_is_conc1 <- IO.liftIO $ W4.isEq sym e conc1_as_sym
+          case MapF.lookup e m of
+            -- value has been seen before and still may be concrete
+            Just (PPa.LiftF (Just conc2)) -> do
+              case testEquality conc1 conc2 of
+                Just Refl -> do
+                  p' <- IO.liftIO $ W4.andPred sym p e_is_conc1
+                  return $ ConcreteMap m p'
+                -- ground value may disagree with cached value, so we conservatively assume symbolic
+                Nothing -> return $ ConcreteMap (MapF.insert e (PPa.LiftF Nothing) m) p
+            -- value has been seen before and is known not-concrete, nothing to do
+            Just (PPa.LiftF Nothing) -> return $ ConcreteMap m p
+            -- first time seeing this value, insert concretized version into cache
+            Nothing -> do
+              p' <- IO.liftIO $ W4.andPred sym p e_is_conc1
+              emitTraceLabel @"expr" "p'" (Some p')
+              return $ ConcreteMap (MapF.insert e (PPa.LiftF (Just conc1)) m) p'
+        
   
+    loop :: W4.Pred sym -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym, Bool)
+    loop not_prev_model (ConcreteMap cm p) = do
+      mresult <- withTracing @"debug" "loop" $ heuristicSat "concretize" not_prev_model $ \case
+        W4R.Sat evalFn -> do
+          emitTrace @"debug" "Sat"
+          emitTrace @"expr" (Some not_prev_model)
+          W4R.Sat <$> TFC.foldrMFC (go evalFn) (ConcreteMap cm (W4.truePred sym)) a
+        W4R.Unsat () -> return $ W4R.Unsat ()
+        W4R.Unknown -> return $ W4R.Unknown
+      case mresult of
+        W4R.Sat (ConcreteMap cm' p') -> do
+          not_this <- IO.liftIO $ W4.notPred sym p'
+          case W4.asConstantPred not_this of
+            Just True -> throwHere $ PEE.ConcretizationFailure "Previous computed model is unsatisfiable" 
+            _ -> withAssumption not_prev_model $ do
+              loop not_this (ConcreteMap cm' (W4.truePred sym))
+          
+        -- predicate is unsatisfiable, so there are no models that disprove all of the
+        -- current cached values
+        W4R.Unsat () -> return $ (ConcreteMap cm p, True)
+        W4R.Unknown -> return (ConcreteMap cm p, False)
+    
+    -- this is a workaround for the fact that we're manually setting the
+    -- abstract domains for any integers coming out of the memory model to be positive.
+    -- What4's bookkeeping sometimes neglects to introduce this assumption into the solver state, so
+    -- we re-add it here explicitly.
+    explicit_nat_asm :: forall tp. W4.SymExpr sym tp -> W4.Pred sym -> EquivM_ sym arch (W4.Pred sym)
+    explicit_nat_asm e p =  do
+      case W4.exprType e of
+        W4.BaseIntegerRepr -> case W4AD.rangeLowBound (W4.integerBounds e)  of
+          W4AD.Inclusive i -> do
+            i_sym <- IO.liftIO $ W4.intLit sym i
+            -- we add an annotation to prevent the expression builder simplification rules from turning this
+            -- into just 'true' if there is a cached result for this comparison
+            (_, e') <- IO.liftIO $ W4.annotateTerm sym (W4.unsafeSetAbstractValue W4AD.unboundedRange e)
+            p' <- IO.liftIO $ W4.intLe sym i_sym e'
+            IO.liftIO $ W4.andPred sym p p'
+          _ -> return p
+        _ -> return p
+  
+  nat_asms <- TFC.foldrMFC explicit_nat_asm (W4.truePred sym) a
+  withAssumption nat_asms $ do
+    (cm, complete) <- loop (W4.truePred sym) cm_outer
+    (ConcreteMap cm_ _) <- case complete of
+      True -> return cm
+      False -> do
+        -- finish the 'ConcreteMap' by double checking each map
+        let
+          upd :: forall tp. W4.SymExpr sym tp -> ConcreteMap sym -> EquivM_ sym arch (ConcreteMap sym)
+          upd e cm_ = concretizeWithMap cm_ e >>= \case
+            Just e' -> case W4.asConcrete e' of
+              -- e is possibly concrete, double check it
+              Just{} -> snd <$> concretizeOne e cm_
+              -- e is known-symbolic, nothing to do
+              Nothing -> return cm_
+            -- e is missing from map entirely, so check it here
+            Nothing -> snd <$> concretizeOne e cm_
+        TFC.foldrMFC' upd cm a
+    let cm' = ConcreteMap cm_ (W4.truePred sym)
+    let
+      conc :: forall tp. W4.SymExpr sym tp -> EquivM_ sym arch (W4.SymExpr sym tp)
+      conc e = fromMaybe e <$> concretizeWithMap cm' e
+
+    a' <- TFC.traverseFC conc a
+    return (a', cm')
+
+-- | Similar to 'concretizeWithSolver' but uses a widening strategy to
+--   attempt to concretize all of the given expressions simultaneously.
+concretizeWithSolverBatch ::
+  forall sym arch ctx.
+  Ctx.Assignment (W4.SymExpr sym) ctx ->
+  EquivM sym arch (Ctx.Assignment (W4.SymExpr sym) ctx)
+concretizeWithSolverBatch es = do
+  emptyCM <- emptyConcreteMap
+  fst <$> concretizeWithSolverGen' emptyCM es
 
 concretizeWithModel ::
   SymGroundEvalFn sym ->
@@ -1409,3 +1641,70 @@ equivalenceContext = withValid $ do
   PA.SomeValidArch d <- CMR.asks envValidArch
   stackRegion <- CMR.asks (PMC.stackRegion . PME.envCtx)
   return $ PEq.EquivContext (PA.validArchDedicatedRegisters d) stackRegion (\x -> x)
+
+
+-- | Run the given continuation with a fresh solver process (without affecting the
+--   current solver process). The new process will inherit the current assumption
+--   context.
+withFreshSolver ::
+  EquivM_ sym arch a ->
+  EquivM sym arch a
+withFreshSolver f = do
+  vcfg <- CMR.asks envConfig
+  let solver = PC.cfgSolver vcfg
+  PSo.Sym n sym _ <- CMR.asks envValidSym
+  st <- withOnlineBackend $ \bak -> safeIO PEE.SolverError $ LCB.saveAssumptionState bak
+  PSo.withOnlineSolver solver Nothing sym $ \bak -> do
+    CMR.local (\env -> env {envValidSym = PSo.Sym n sym bak }) $ do
+      -- we need to ensure that the solver process is started, since otherwise
+      -- restoreSolverState does nothing
+      withSolverProcess $ \_sp ->
+        safeIO PEE.SolverError $ LCBO.restoreSolverState bak st
+      f
+
+-- | Similar to 'withForkedSolver' but does not return a result.
+withForkedSolver_ ::
+  EquivM_ sym arch () ->
+  EquivM sym arch ()
+withForkedSolver_ f = do
+  thistid <- IO.liftIO $ IO.myThreadId
+  _ <- IO.withRunInIO $ \runInIO -> 
+    IO.forkFinally (runInIO $ withFreshSolver f)
+      (\case Left err -> IO.throwTo thistid err; Right () -> return ())
+  return ()
+
+-- | Run the given function in a forked thread with a fresh solver process.
+--   This is non-blocking and the current solver process is left unmodified.
+--   The returned IO action will block until the given function has finished.
+withForkedSolver ::
+  EquivM_ sym arch a ->
+  EquivM sym arch (IO a)
+withForkedSolver f = do
+  thistid <- IO.liftIO $ IO.myThreadId
+  outVar <- IO.liftIO $ IO.newEmptyMVar
+  _ <- IO.withRunInIO $ \runInIO -> 
+    IO.forkFinally (runInIO $ withFreshSolver f)
+      (\case Left err -> IO.throwTo thistid err; Right a -> IO.putMVar outVar a)
+  return $ IO.readMVar outVar
+
+
+-- | Similar to 'forBins' but runs the 'Patched' process in a separate thread
+--   concurrently with a fresh solver process.
+forkBins ::
+   (forall bin. PBi.WhichBinaryRepr bin -> EquivM_ sym arch (f bin)) ->
+   EquivM sym arch (PPa.PatchPair f)
+forkBins f = do
+  (resO, resP) <- do
+    thistid <- IO.liftIO $ IO.myThreadId
+    outVar2 <- IO.liftIO $ IO.newEmptyMVar
+    _ <- IO.withRunInIO $ \runInIO -> 
+      IO.forkFinally (runInIO $ withFreshSolver $ (PPa.catchPairErr (Just <$> f PBi.PatchedRepr) (return Nothing)))
+        (\case Left err -> IO.throwTo thistid err; Right a -> IO.putMVar outVar2 a)
+    resO <- PPa.catchPairErr (Just <$> f PBi.OriginalRepr) (return Nothing)
+    resP <- IO.liftIO $ IO.readMVar outVar2
+    return (resO, resP)
+  case (resO, resP) of
+    (Just vO, Just vP) -> return $ PPa.PatchPair vO vP
+    (Nothing, Just vP) -> return $ PPa.PatchPairPatched vP
+    (Just vO, Nothing) -> return $ PPa.PatchPairOriginal vO
+    (Nothing, Nothing) -> PPa.throwPairErr

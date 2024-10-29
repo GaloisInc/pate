@@ -12,7 +12,7 @@ The fastest way to get started is to build the Docker image and use the tool via
 
 First, build the Docker image with the command::
 
-  docker build . -t pate
+  docker build --platform linux/amd64 . -t pate
 
 Next, run the verifier on an example::
 
@@ -87,7 +87,7 @@ The verifier accepts the following command line arguments::
   --read-only-segments ARG Mark segments as read-only (0-indexed) when loading
                            ELF
   --script FILENAME        Save macaw CFGs to the provided directory
-  --assume-stack-scope     Add additional assumptions about stack frame scoping 
+  --assume-stack-scope     Add additional assumptions about stack frame scoping
                            during function calls (unsafe)
   --ignore-warnings ARG    Don't raise any of the given warning types
   --always-classify-return Always resolve classifier failures by assuming
@@ -107,13 +107,14 @@ If you have a ``tar`` file of a Docker image of the verifier, you can install it
 
 To run the verifier via Docker after this::
 
-  docker run --rm -it pate --help
+  docker run --rm -it --platform linux/amd64 pate --help
 
 To make use of the verifier with Docker, it is useful to map a directory on your local filesystem into the Docker container to be able to save output files. Assuming that your original and patched binaries are ``original.exe`` and ``patched.exe``, respectively::
 
   mkdir VerifierData
   cp original.exe patched.exe VerifierData/
-  docker run --rm -it -v `pwd`/VerifierData`:/VerifierData pate \
+  docker run --rm -it --platform linux/amd64 \
+             -v `pwd`/VerifierData`:/VerifierData pate \
              --original /VerifierData/original.exe \
              --patched /VerifierData/patched.exe \
              --proof-summary-json /VerifierData/report.json \

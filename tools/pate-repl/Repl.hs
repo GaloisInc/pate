@@ -74,6 +74,9 @@ import Unsafe.Coerce(unsafeCoerce)
 import qualified Output as PO
 import qualified Control.Concurrent as MVar
 
+import Data.Time
+import Data.Fixed
+
 maxSubEntries :: Int
 maxSubEntries = 5
 
@@ -295,7 +298,11 @@ run rawOpts = do
               -- Instead, we delay to wait for the script to make that
               -- initial choice, and then 'wait' to start printing
               -- the nodes as they are processed.
-              execReplM $ IO.liftIO $ IO.threadDelay 1000000 >> wait
+              execReplM $ IO.liftIO $ do
+                IO.hFlush IO.stdout
+                IO.threadDelay 500000
+                IO.hFlush IO.stdout
+                wait
             False ->
               -- In all other cases, we just print the initial prompt.
               -- The 'tree_ready' lock ensures that we only get to this point
@@ -405,12 +412,12 @@ ppSuffix nesting s nm = do
 ppStatusTag :: NodeStatus -> Maybe (PP.Doc a)
 ppStatusTag st = case st of
   _ | isBlockedStatus st -> Just "?"
-  NodeStatus StatusSuccess False _ -> Just "*"
-  NodeStatus (StatusWarning _) False _ -> Just "!*"
-  NodeStatus (StatusWarning _) True _ -> Just "!"
-  NodeStatus (StatusError _) False _ -> Just "*x"
-  NodeStatus (StatusError _) True _ -> Just "x"
-  NodeStatus StatusSuccess True _ -> Nothing
+  NodeStatus StatusSuccess Nothing _ -> Just "*"
+  NodeStatus (StatusWarning _) Nothing _ -> Just "!*"
+  NodeStatus (StatusWarning _) (Just{}) _ -> Just "!"
+  NodeStatus (StatusError _) Nothing _ -> Just "*x"
+  NodeStatus (StatusError _) (Just{}) _ -> Just "x"
+  NodeStatus StatusSuccess (Just{}) _ -> Nothing
 
 maybeSubNodes ::
   forall sym arch nm a.
@@ -434,8 +441,17 @@ maybeSubNodes nd@(TraceNode lbl v subtree) g f = do
 
 
 
-
-
+ppDuration ::
+  [TraceTag] ->
+  TraceTree '(sym,arch) ->
+  ReplM sym arch (Maybe (PP.Doc ()))
+ppDuration tags subtree = do
+  b <- IO.liftIO $ getTreeStatus subtree
+  return $ case finishedAt b of
+    Just fin | elem "time" tags -> Just $ (PP.viaShow $ 
+      let t = diffUTCTime fin (traceTreeStartTime subtree)
+      in (round (t * 1000))) <> "ms"
+    _ -> Nothing
 
 prettyNextNodes ::
   forall sym arch.
@@ -450,14 +466,17 @@ prettyNextNodes startAt onlyFinished = do
        mapM (\(nesting, Some (nd@(TraceNode lbl v subtree) :: TraceNode sym arch nm)) -> do
                 b <- IO.liftIO $ getTreeStatus subtree
                 json <- IO.liftIO $ jsonNode @_ @'(sym, arch) @nm sym lbl v
+                duration <- ppDuration tags subtree
                 case prettyNodeAt @'(sym, arch) @nm tags lbl v of
                   Just pp -> do
                     suf <- ppSuffix nesting b (knownSymbol @nm)
                     let indent = abs(nesting)*2
+
                     return $ PO.OutputElem 
                       { PO.outIdx = 0
                       , PO.outIndent = indent
                       , PO.outPP = pp
+                      , PO.outDuration = duration
                       , PO.outFinished = isFinished b
                       , PO.outSuffix = suf
                       , PO.outMoreResults = nesting < 0
@@ -472,6 +491,7 @@ prettyNextNodes startAt onlyFinished = do
                       { PO.outIdx = 0
                       , PO.outIndent = 0
                       , PO.outPP = "<ERROR: Unexpected missing printer>"
+                      , PO.outDuration = duration
                       , PO.outFinished = isFinished b
                       , PO.outSuffix = Nothing
                       , PO.outMoreResults = nesting < 0
@@ -549,12 +569,18 @@ status' mlimit = do
     SomeReplState {} -> execReplM $ do
       (Some (TraceNode _ _ t))  <- gets replNode
       st <- IO.liftIO $ getTreeStatus t
-      case st of
-        _ | isBlockedStatus st -> PO.printMsgLn $ "Waiting for input.."
-        NodeStatus (StatusWarning e) _ _ -> PO.printMsgLn $ "Warning: \n" <> (PP.pretty (chopMsg mlimit (show e)))
-        NodeStatus (StatusError e) _ _ ->  PO.printMsgLn $ "Error: \n" <> (PP.pretty (chopMsg mlimit (show e)))
-        NodeStatus StatusSuccess False _ ->  PO.printMsgLn $ "In progress.."
-        NodeStatus StatusSuccess True _ -> PO.printMsgLn $ "Finalized"
+
+      let pp = case st of
+            _ | isBlockedStatus st -> "Waiting for input.."
+            NodeStatus (StatusWarning e) _ _ -> "Warning: \n" <> (PP.pretty (chopMsg mlimit (show e)))
+            NodeStatus (StatusError e) _ _ ->  "Error: \n" <> (PP.pretty (chopMsg mlimit (show e)))
+            NodeStatus StatusSuccess Nothing _ ->  "In progress.."
+            NodeStatus StatusSuccess (Just{}) _ -> "Finalized"
+      tags <- gets replTags
+      duration <- ppDuration tags t
+      case duration of
+        Just pp' -> PO.printMsgLn $ pp <+> pp'
+        Nothing -> PO.printMsgLn pp
       prevNodes <- gets replPrev
       fin <- IO.liftIO $ IO.readIORef finalResult
       case (prevNodes, fin) of
@@ -638,8 +664,8 @@ goto_status' f = do
 
 isErrStatus :: NodeStatus -> Bool
 isErrStatus = \case
-  NodeStatus StatusSuccess True _ -> False
-  NodeStatus _ False _ -> False
+  NodeStatus StatusSuccess (Just{}) _ -> False
+  NodeStatus _ Nothing _ -> False
   _ -> True
 
 goto_err :: IO ()

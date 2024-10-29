@@ -162,6 +162,7 @@ library
                        Pate.Script,
                        Pate.Timeout,
                        Pate.TraceTree,
+                       Pate.TraceCollection,
                        Pate.TraceConstraint,
                        Pate.ExprMappable,
                        What4.ExprHelpers,

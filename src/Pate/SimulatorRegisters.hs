@@ -98,6 +98,13 @@ data MacawRegVar sym (tp :: MT.Type) where
     , macawVarBVs :: Ctx.Assignment (WI.SymExpr sym) (CrucBaseTypes (MS.ToCrucibleType tp))
     } -> MacawRegVar sym tp
 
+instance PEM.ExprFoldable sym (MacawRegVar sym tp) where
+  foldExpr sym f entry b = PEM.withSymExprFoldable sym $
+    PEM.foldExpr sym f (macawVarBVs entry) b >>= PEM.foldExpr sym f (macawVarEntry entry)
+
+
+instance forall sym. PEM.ExprFoldableF sym (MacawRegVar sym)
+
 instance (WI.IsExpr (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
   show (MacawRegEntry repr v) = case repr of
     CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ "+" ++ show (WI.printSymExpr bv)
@@ -150,11 +157,5 @@ instance PEM.ExprFoldable sym (MacawRegEntry sym tp) where
       CT.BoolRepr -> f (macawRegValue entry) b
       CT.StructRepr Ctx.Empty -> return b
       rep -> error ("foldExpr: unsupported macaw type " ++ show rep)
-
-instance forall sym. PEM.ExprFoldableF sym (MacawRegVar sym)
-
-instance PEM.ExprFoldable sym (MacawRegVar sym tp) where
-  foldExpr sym f (MacawRegVar e vs) b =
-    PEM.withSymExprFoldable sym $ PEM.foldExpr sym f e b >>= PEM.foldExpr sym f vs
 
 instance forall sym. PEM.ExprFoldableF sym (MacawRegEntry sym)

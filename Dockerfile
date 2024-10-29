@@ -1,5 +1,8 @@
 ## Clone git into image
-FROM --platform=linux/amd64 ubuntu:20.04 as gitbase
+FROM ubuntu:20.04 AS gitbase
+
+ARG TARGETPLATFORM
+RUN if [ "${TARGETPLATFORM}" != "linux/amd64" ]; then echo "TARGETPLATFORM '${TARGETPLATFORM}' is not supported, use '--platform linux/amd64'"; exit 1; fi
 
 RUN apt update && apt install -y ssh
 RUN apt install -y git
@@ -30,7 +33,7 @@ RUN find . -name .gitignore -exec rm {} \;
 
 
 ## Build project in image
-FROM --platform=linux/amd64 ubuntu:20.04
+FROM ubuntu:20.04
 ENV GHC_VERSION=9.6.2
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
@@ -43,13 +46,13 @@ RUN apt-get install -y yices2
 
 RUN curl https://downloads.haskell.org/~ghcup/x86_64-linux-ghcup -o /usr/bin/ghcup && chmod +x /usr/bin/ghcup
 RUN mkdir -p /root/.ghcup && ghcup install-cabal
-RUN ghcup install ghc ${GHC_VERSION} && ghcup set ghc ${GHC_VERSION} 
+RUN ghcup install ghc ${GHC_VERSION} && ghcup set ghc ${GHC_VERSION}
 
 RUN apt install locales
 RUN locale-gen en_US.UTF-8
-ENV LANG en_US.UTF-8
-ENV LANGUAGE en_US:en
-ENV LC_ALL en_US.UTF-8
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
 
 
 ######################################################################
@@ -82,7 +85,7 @@ RUN cabal v2-build what4
 # crucible
 COPY --from=gitbase /home/src/submodules/crucible /home/src/submodules/crucible
 RUN cabal v2-build crucible
- 
+
 # arm-asl-parser
 COPY --from=gitbase /home/src/submodules/arm-asl-parser /home/src/submodules/arm-asl-parser
 RUN cabal v2-build asl-parser
@@ -114,7 +117,7 @@ RUN cabal v2-build binary-symbols flexdis86
 #mutual dependency between these submodules
 # macaw
 COPY --from=gitbase /home/src/submodules/macaw /home/src/submodules/macaw
- 
+
 # macaw-loader
 COPY --from=gitbase /home/src/submodules/macaw-loader /home/src/submodules/macaw-loader
 RUN cabal v2-build macaw-base macaw-loader macaw-semmc

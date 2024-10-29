@@ -19,7 +19,7 @@ Build the image using the following commands:
   git clone git@github.com:GaloisInc/pate.git
   cd pate
   git submodule update --init
-  docker build . -t pate
+  docker build --platform linux/amd64 . -t pate
 \end{verbatim}
 
 \pate{} may subsequently be used via Docker, such as:

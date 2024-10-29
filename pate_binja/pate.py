@@ -684,6 +684,41 @@ class PateWrapper:
             self.user.show_message(str(rec))
 
 
+class TraceCollection:
+
+    def __init__(self, desc: str, raw: dict):
+        self.desc = desc
+        self.allTraces = raw['all_traces']
+        self.cellTraces = self._extractTraceMap(raw['trace_map_cells'])
+        self.regTraces = self._extractTraceMap(raw['trace_map_regs'])
+
+    def _extractTraceMap(self, raw: dict):
+        traceMap = []
+        for kv in raw['map']:
+            traces = [self.allTraces[ti] for ti in kv['val']]
+            traceMap.append({'location': kv['key'], 'traces': traces})
+        return traceMap
+
+
+class WideningInfo:
+
+    def __init__(self, raw: dict):
+        self.postdomain = None
+        self.valueTraceCollection = None
+        self.equalityTraceCollection = None
+        self.sharedEnv = None
+
+        if raw.get('name') == 'Equivalence Counter-example Traces':
+            for ltv in raw['contents']:
+                if ltv['label'] == 'Postdomain' and ltv['type'] == 'domain':
+                    self.postdomain = ltv['value']
+                elif ltv['label'] == 'Value' and ltv['type'] == 'trace_collection':
+                    self.valueTraceCollection = TraceCollection('Value', ltv['value'])
+                elif ltv['label'] == 'Equality' and ltv['type'] == 'trace_collection':
+                    self.equalityTraceCollection = TraceCollection('Equality', ltv['value'])
+            self.sharedEnv = raw['shared_env']
+
+
 class CFARNode:
     exits: list[CFARNode]
     finished: bool
@@ -693,7 +728,6 @@ class CFARNode:
         (self.original_addr, self.patched_addr) = get_cfar_addr(id)
         self.exits = []
         self.exit_meta_data = {}
-        self.update_node(desc, data)
         self.desc = desc
         self.data = data
         self.predomain = None
@@ -708,6 +742,10 @@ class CFARNode:
         self.trace_footprint = None
         self.traceConstraints = None
         self.instruction_trees = None
+        self.wideningInfo = None
+
+        # After default initializations above, update the node
+        self.update_node(desc, data)
 
     def update_node(self, desc: str, data: dict):
         self.desc = desc
@@ -715,6 +753,13 @@ class CFARNode:
         self.predomain = get_domain(data, 'Predomain')
         self.postdomain = get_domain(data, 'Postdomain')
         self.external_postdomain = get_domain(data, 'ExternalPostDomain')
+
+        for cw in data.get('trace_node_contents', []):
+            content = cw['content']
+            if content and content.get('name') == 'Equivalence Counter-example Traces':
+                self.wideningInfo = WideningInfo(content)
+                pass
+
 
     def addExit(self, node: CFARNode) -> bool:
         """Add a block exit to node if new.
@@ -1747,7 +1792,9 @@ class TtyUserInteraction(PateUserInteraction):
             print()
             choice = input("Show CFAR Graph (y or n)? ")
         else:
-            choice = 'y'
+            # Choose which you want when no ask
+            #choice = 'y'
+            choice = 'n'
 
         if choice == 'y':
             print('\nPate CFAR Graph:\n')

@@ -46,6 +46,11 @@ module Pate.Verification.AbstractDomain
   , singletonDomain
   , zipSingletonDomains
   , widenAbsDomainEqMetaData
+  , GetAbsRange
+  , mkGetAbsRange
+  , batchGetAbsRange
+  , getAbsRange
+  , getAbsRange1
   ) where
 
 import qualified Prettyprinter as PP
@@ -54,7 +59,7 @@ import           Control.Monad.Trans ( lift )
 import           Control.Monad ( forM, unless )
 import qualified Control.Monad.IO.Class as IO
 import qualified Control.Monad.Writer as CMW
-import           Control.Lens ( (^.) )
+import           Control.Lens ( (^.), (&), (.~) )
 
 import           Data.Functor.Const
 import qualified Data.Set as S
@@ -109,6 +114,8 @@ import Data.Parameterized (knownSymbol)
 import qualified What4.JSON as W4S
 import           Data.Aeson ( (.=) )
 import qualified Data.Aeson as JSON
+import qualified Data.IORef as IO
+import qualified Data.Functor.Product as Product
 
 type instance PL.LocationK "memevent" = ()
 type instance PL.LocationK "absrange" = W4.BaseType
@@ -140,6 +147,9 @@ instance forall sym arch v. (PSo.ValidSym sym, PA.ValidArch arch) => W4S.W4Seria
   w4Serialize abs_dom = do
     eq_dom <- W4S.w4Serialize (absDomEq abs_dom)
     return $ JSON.object [ "eq_domain" .= eq_dom, "val_domain" .= JSON.String "TODO" ]
+
+instance forall sym arch. (PSo.ValidSym sym, PA.ValidArch arch) => W4S.W4SerializableF sym (AbstractDomain sym arch)
+
 
 -- | Restrict an abstract domain to a single binary.
 singletonDomain ::
@@ -431,6 +441,30 @@ instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Semigroup (WidenLocs sym 
 instance (OrdF (W4.SymExpr sym), PA.ValidArch arch) => Monoid (WidenLocs sym arch) where
   mempty = WidenLocs mempty
 
+joinMemCellAbsValues ::
+  W4.IsSymExprBuilder sym =>
+  MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s) ->
+  MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s) ->
+  MapF.MapF (PMC.MemCell sym arch)  (MemAbstractValue s)
+joinMemCellAbsValues = MapF.mergeWithKey 
+ (\_cell (MemAbstractValue v1) (MemAbstractValue v2) -> Just $ MemAbstractValue $ combineAbsVals v1 v2) 
+ id 
+ id
+
+-- Track if we ever write a concrete value to a given cell
+collapseMemCellVals :: 
+  forall sym arch.
+  W4.IsSymExprBuilder sym => 
+  [MapF.Pair (PMC.MemCell sym arch) (MemAbstractValue sym)] -> 
+  MapF.MapF (PMC.MemCell sym arch) (Const (Bool, Bool))
+collapseMemCellVals = foldr go MapF.empty
+  where
+    go :: MapF.Pair (PMC.MemCell sym arch)  (MemAbstractValue s) -> MapF.MapF (PMC.MemCell sym arch) (Const (Bool, Bool)) -> MapF.MapF (PMC.MemCell sym arch) (Const (Bool, Bool)) 
+    go (MapF.Pair k (MemAbstractValue (MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs)))) m = 
+      MapF.insertWith (\(Const (a,b)) (Const (c, d)) -> Const (a || c, b || d)) k 
+        (Const (case regAbs of AbsUnconstrained{} -> False; _ -> True, case offsetAbs of AbsUnconstrained{} -> False; _ -> True)) m
+
+
 -- | From the result of symbolic execution (in 'PS.SimOutput') we extract any abstract domain
 -- information that we can establish for the registers, memory reads and memory writes.
 initAbsDomainVals ::
@@ -442,25 +476,43 @@ initAbsDomainVals ::
   IsTreeBuilder '(sym, arch) e m =>
   sym ->
   PE.EquivContext sym arch ->
-  (forall tp. W4.SymExpr sym tp -> m (AbsRange tp)) ->
+  GetAbsRange sym m ->
   PS.SimOutput sym arch v bin ->
   AbstractDomainVals sym arch bin {- ^ values from pre-domain -} ->
   m (AbstractDomainVals sym arch bin)
-initAbsDomainVals sym eqCtx f stOut preVals = do
-  foots <- fmap S.toList $ IO.liftIO $ MT.traceFootprint sym (PS.simOutMem stOut)
+initAbsDomainVals sym eqCtx getAbs stOut preVals = do
+  traceOps <- fmap S.toList $ IO.liftIO $ MT.traceFootprintOps sym (PS.simOutMem stOut)
   -- NOTE: We need to include any cells from the pre-domain to ensure that we
   -- propagate forward any value constraints for memory that is not accessed in this
   -- slice
-  let prevCells = map fstPair $ filter (\(MapF.Pair _ (MemAbstractValue v)) -> not (isUnconstrained v)) (MapF.toList (absMemVals preVals))
-  let cells = (S.toList . S.fromList) $ map (\(MT.MemFootprint ptr w _dir _cond end) -> Some (PMC.MemCell ptr w end)) foots ++ prevCells
-  subTree @"loc" "Initial Domain" $ do
-    regVals <- MM.traverseRegsWith (\r v -> subTrace (PL.SomeLocation (PL.Register r)) $ getRegAbsVal r v) (PS.simOutRegs stOut)
-    memVals <- fmap MapF.fromList $ forM cells $ \(Some cell) -> do
-      absVal <- subTrace (PL.SomeLocation (PL.Cell cell)) $ getMemAbsVal cell
-      return (MapF.Pair cell absVal)
-    mr <- subTrace (PL.SomeLocation (PL.Named (knownSymbol @"maxRegion"))) $ f (PS.unSE $ PS.simMaxRegion $ (PS.simOutState stOut))
-    return (AbstractDomainVals regVals memVals mr)
+  let prevCells = (S.toList . S.fromList) $ map fstPair $ filter (\(MapF.Pair _ (MemAbstractValue v)) -> not (isUnconstrained v)) (MapF.toList (absMemVals preVals))
+
+  regVals <- subTree @"loc" "Initial Domain 1" $ do
+    MM.traverseRegsWith (\r v -> subTrace (PL.SomeLocation (PL.Register r)) $ getRegAbsVal r v) (PS.simOutRegs stOut)
+  
+  memPreVals <- subTree @"loc" "Initial Domain 2" $ do
+    -- collect models for any cells in the abstract domain with known
+    -- concrete values first
+    forM prevCells $ \(Some cell) -> subTrace (PL.SomeLocation (PL.Cell cell)) $ do
+        absVal <- getMemAbsVal cell
+        return $ MapF.Pair cell absVal
+    
+  -- next we check if the written value was actually concrete, otherwise we can skip these writes
+  memTracePrevVals <- subTree @"loc" "Initial Domain 3" $ fmap collapseMemCellVals $ forM traceOps $ \mop@(MT.MemOp ptr _dir _cond (w :: MT.NatRepr w) _val end) -> do
+    let cell = PMC.MemCell ptr w end
+    subTrace (PL.SomeLocation (PL.Cell cell)) $ getMemOpAbsVal mop
+  
+  memTraceVals <- subTree @"loc" "Initial Domain 4" $  
+    MapF.traverseWithKey (\cell (Const (b1, b2)) -> subTrace (PL.SomeLocation (PL.Cell cell)) $ getCellWithPrevAbsVal cell b1 b2) memTracePrevVals
+
+  let memVals = joinMemCellAbsValues (MapF.fromList memPreVals) memTraceVals
+
+  mr <- subTree @"loc" "Initial Domain 5" $  subTrace (PL.SomeLocation (PL.Named (knownSymbol @"maxRegion"))) $ f (PS.unSE $ PS.simMaxRegion $ (PS.simOutState stOut))
+  return (AbstractDomainVals regVals memVals mr)
   where
+    f :: forall tp. W4.SymExpr sym tp -> m (AbsRange tp)
+    f = getAbsRange1 getAbs
+
     getMemAbsVal ::
       PMC.MemCell sym arch w ->
       m (MemAbstractValue sym w)
@@ -486,6 +538,40 @@ initAbsDomainVals sym eqCtx f stOut preVals = do
             MacawAbstractValue (Ctx.Empty Ctx.:> _ Ctx.:> AbsUnconstrained _) <- v -> return $ noAbsVal (MT.typeRepr r)
           _ -> return v
       _ -> getAbsVal sym f e
+
+    getMemOpAbsVal ::
+      MT.MemOp sym (MC.ArchAddrWidth arch) ->
+      m (MapF.Pair (PMC.MemCell sym arch) (MemAbstractValue sym))
+    getMemOpAbsVal (MT.MemOp ptr _dir _cond (w :: MT.NatRepr w) val end) = do
+      let CLM.LLVMPointer region offset = val
+      regAbs <- f (W4.natToIntegerPure region)
+      offsetAbs <- f offset
+      return $ MapF.Pair cell (MemAbstractValue $ MacawAbstractValue (Ctx.Empty Ctx.:> regAbs Ctx.:> offsetAbs))
+
+      where
+        cell :: PMC.MemCell sym arch w
+        cell = PMC.MemCell ptr w end
+
+    -- extract a final abstract value from a first-pass check
+    getCellWithPrevAbsVal ::
+      PMC.MemCell sym arch w ->
+      Bool ->
+      Bool ->
+      m (MemAbstractValue sym w)
+    getCellWithPrevAbsVal cell regMaybeConcrete offMaybeConcrete = do
+      CLM.LLVMPointer mem_region mem_offset <- IO.liftIO $ PMC.readMemCell sym (PS.simOutMem stOut) cell
+      -- we avoid checking the actual memory model for concrete values if we didn't originally
+      -- write/read a concrete value, since it's unlikely to succeed (outside of strange memory aliasing cases)
+      -- since this is an under-approximation it's safe to just leave them as unconstrained
+      memRegAbs <- case regMaybeConcrete of
+        False -> return $ AbsUnconstrained W4.BaseIntegerRepr
+        True -> f (W4.natToIntegerPure mem_region)
+
+      memOffsetAbs <- case offMaybeConcrete of
+        False -> return $ AbsUnconstrained (W4.exprType mem_offset)
+        True -> f mem_offset
+      
+      return $ MemAbstractValue $ MacawAbstractValue (Ctx.Empty Ctx.:> memRegAbs Ctx.:> memOffsetAbs)
 
 -- | Convert the abstract domain from an expression into an equivalent 'AbsRange'
 -- TODO: Currently this only extracts concrete values
@@ -888,6 +974,11 @@ ppDomainKind = \case
   Postdomain -> "Intermediate postdomain"
   ExternalPostDomain -> "Postdomain"
 
+instance JSON.ToJSON DomainKind where
+  toJSON dk = JSON.toJSON (show dk)
+
+instance W4S.W4Serializable sym DomainKind
+
 instance (PA.ValidArch arch, PSo.ValidSym sym) => IsTraceNode '(sym,arch) "domain" where
   type TraceNodeType '(sym,arch) "domain" = Some (AbstractDomain sym arch)
   type TraceNodeLabel "domain" = DomainKind
@@ -944,6 +1035,131 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => PL.LocationWitherable sym arch
           Just ((Const x'), p') -> return $ (Just x', p')
           Nothing -> return $ (Nothing, W4.falsePred sym)) s
 
+newtype GetAbsRange sym m = GetAbsRange { getAbsRange :: forall ctx. Ctx.Assignment (W4.SymExpr sym) ctx -> m (Ctx.Assignment AbsRange ctx) }
 
+
+-- FIXME: Move this to Parameterized
+
+data WithEmbedding v ctx = forall sub. WithEmbedding (Ctx.CtxEmbedding sub ctx) (v sub)
+
+type MaybeF f = PPa.LiftF Maybe f
+
+-- Strip the 'Nothing' results from an 'Assignment'
+flattenMaybeCtx ::
+  Ctx.Assignment (MaybeF f) ctx ->
+  (WithEmbedding (Ctx.Assignment f) ctx)
+flattenMaybeCtx = \case
+  Ctx.Empty -> WithEmbedding (Ctx.CtxEmbedding Ctx.zeroSize Ctx.Empty) Ctx.Empty
+  xs Ctx.:> x | WithEmbedding embed xs' <- flattenMaybeCtx xs -> case x of
+    PPa.LiftF (Just x') -> WithEmbedding (Ctx.extendEmbeddingBoth embed) (xs' Ctx.:> x')
+    PPa.LiftF Nothing -> WithEmbedding (Ctx.extendEmbeddingRight embed) xs'
+
+dropEmbedding :: Ctx.CtxEmbedding (sub Ctx.::> tp) ctx -> Ctx.CtxEmbedding sub ctx
+dropEmbedding (Ctx.CtxEmbedding sz (idxs Ctx.:> _)) = Ctx.CtxEmbedding sz idxs
+
+reverseEmbedding :: 
+  Ctx.CtxEmbedding sub ctx ->
+  Ctx.Assignment f sub ->
+  Ctx.Assignment (MaybeF f) ctx
+reverseEmbedding embed@(Ctx.CtxEmbedding sz idxs) asn = case (idxs, asn) of
+    (Ctx.Empty, Ctx.Empty) -> Ctx.replicate sz (PPa.LiftF Nothing)
+    (_ Ctx.:> idx, asn' Ctx.:> x') -> 
+      let res = reverseEmbedding (dropEmbedding embed) asn'
+      in  res & (ixF idx) .~ PPa.LiftF (Just x')
+
+mapMaybeCtx :: 
+  forall f g ctx m.
+  Monad m =>
+  (forall sub_ctx. Ctx.CtxEmbedding sub_ctx ctx -> Ctx.Assignment f sub_ctx -> m (Ctx.Assignment g sub_ctx)) ->
+  Ctx.Assignment (MaybeF f) ctx ->
+  m (Ctx.Assignment (MaybeF g) ctx)
+mapMaybeCtx f asn | WithEmbedding embed asn' <- flattenMaybeCtx asn = do
+  asn'' <- f embed asn'
+  return $ reverseEmbedding embed asn''
+
+partitionCtx ::
+  Monad m =>
+  (forall tp. f tp -> m (Either (g tp) (h tp))) ->
+  Ctx.Assignment f ctx ->
+  m (Ctx.Assignment (MaybeF g) ctx, Ctx.Assignment (MaybeF h) ctx)
+partitionCtx part = \case
+  Ctx.Empty -> return (Ctx.Empty, Ctx.Empty)
+  xs Ctx.:> x -> part x >>= \case
+    Left g -> partitionCtx part xs >>= \(gs,hs) -> return (gs Ctx.:> PPa.LiftF (Just g), hs Ctx.:> PPa.LiftF Nothing)
+    Right h -> partitionCtx part xs >>= \(gs,hs) -> return (gs Ctx.:> PPa.LiftF Nothing, hs Ctx.:> PPa.LiftF (Just h))
+
+
+mkGetAbsRange :: 
+  forall m sym.
+  IO.MonadIO m =>
+  W4.IsSymExprBuilder sym =>
+  (forall ctx. Ctx.Assignment (W4.SymExpr sym) ctx -> m (Ctx.Assignment AbsRange ctx)) ->
+  m (GetAbsRange sym m)
+mkGetAbsRange f = do
+  (cache :: IO.IORef (MapF.MapF (W4.SymExpr sym) (AbsRange)))  <- IO.liftIO $ IO.newIORef MapF.empty
+  let 
+    getCache :: forall tp. W4.SymExpr sym tp -> m (Either (W4.SymExpr sym tp) (AbsRange tp))
+    getCache e = do
+      m <- IO.liftIO $ IO.readIORef cache
+      case MapF.lookup e m of
+        Just a -> return $ Right a
+        Nothing -> return $ Left e
+
+  return $ GetAbsRange $ \es -> do
+    (es_uncached, as_cached) <- partitionCtx getCache es
+    as_result <- mapMaybeCtx (\_ -> f) es_uncached
+    let 
+      go :: forall tp. MaybeF AbsRange tp -> MaybeF AbsRange tp -> AbsRange tp
+      go a b = case (a, b) of
+          (PPa.LiftF (Just a'), _) -> a'
+          (_, PPa.LiftF (Just a')) -> a'
+          _ -> error $ "mapMaybeCtx: impossible 'Nothing' result"
+    return $ Ctx.zipWith go as_result as_cached
+
+getAbsRange1 :: Monad m => GetAbsRange sym m -> (forall tp. W4.SymExpr sym tp -> m (AbsRange tp))
+getAbsRange1 f = (\e -> getAbsRange f (Ctx.singleton e) >>= \case (Ctx.Empty Ctx.:> a) -> return a)
+
+-- | Batch the concretization of many values at once, given a function 'f' that
+--   uses a 'GetAbsRange' multiple times to concretize many individual expressions.
+--
+--   This runs the given 'f' twice, once with a dummy 'GetAbsRange' in order to collect
+--   the values that need to be concretized. Once collected, they are all concretized
+--   at once, and then these concrete values are used on the second run of 'f'.
+batchGetAbsRange :: 
+  forall sym m a.
+  IO.MonadIO m => 
+  W4.IsSymExprBuilder sym =>
+  GetAbsRange sym m -> 
+  (GetAbsRange sym m -> m a) -> 
+  m a
+batchGetAbsRange mkabs f = do
+  (ref :: IO.IORef (MapF.MapF (W4.SymExpr sym) (PPa.LiftF Maybe AbsRange)))  <- IO.liftIO $ IO.newIORef MapF.empty
+  let 
+    dummy1 :: forall tp. W4.SymExpr sym tp -> m (AbsRange tp)
+    dummy1 e = do
+      IO.liftIO $ IO.modifyIORef ref (MapF.insert e (PPa.LiftF Nothing))
+      return $ AbsUnconstrained (W4.exprType e)
+
+    dummy :: GetAbsRange sym m
+    dummy = GetAbsRange $ TFC.traverseFC dummy1
+  _ <- f dummy
+  m <- IO.liftIO $ IO.readIORef ref
+  Some ctx <- return $ Ctx.fromList (MapF.keys m)
+  ctx' <- getAbsRange mkabs ctx
+
+  to_exprs1 <- Ctx.traverseWithIndex (\idx v -> return $ Product.Pair v (ctx' Ctx.! idx)) ctx
+  let 
+    to_exprs :: MapF.MapF (W4.SymExpr sym) AbsRange
+    to_exprs = MapF.fromList $ TFC.toListFC (\(Product.Pair v a) -> MapF.Pair v a) to_exprs1
+
+    cached1 :: forall tp. W4.SymExpr sym tp -> m (AbsRange tp)
+    cached1 e = case MapF.lookup e to_exprs of
+      Just a -> return a 
+      Nothing -> getAbsRange1 mkabs e
+
+    cached :: GetAbsRange sym m
+    cached = GetAbsRange $ TFC.traverseFC cached1
+  
+  f cached
 
 

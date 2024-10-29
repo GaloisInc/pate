@@ -32,12 +32,17 @@ module What4.JSON
   , (.=~)
   , ExprEnv
   , mergeEnvs
+  , ExprCache
+  , cacheToEnv
+  , emptyExprCache
+  , w4ToJSONWithCache
   , W4Deserializable(..)
   , jsonToW4
   , readJSON
   , (.:)
   , SymDeserializable(..)
   , symDeserializable
+  , serializeExprEnv
   ) where
 
 import           Control.Monad.State (MonadState (..), State, modify, evalState, runState)
@@ -46,6 +51,8 @@ import qualified Data.Map.Ordered as OMap
 import           Data.List ( stripPrefix )
 import           Data.Maybe ( mapMaybe, catMaybes )
 import           Data.Map (Map)
+import           Data.Set (Set)
+import qualified Data.Set as Set
 import qualified Data.Map.Merge.Strict as Map
 import           Data.Text (Text)
 import           Data.Data (Proxy(..), Typeable)
@@ -115,6 +122,9 @@ instance MonadState (ExprCache sym) (W4S sym) where
 class W4Serializable sym a where
   w4Serialize :: a -> W4S sym JSON.Value
 
+  default w4Serialize :: JSON.ToJSON a => a -> W4S sym JSON.Value
+  w4Serialize a = return $ JSON.toJSON a
+
 w4SerializeString :: Show a => a -> W4S sym JSON.Value
 w4SerializeString s = return $ JSON.String (T.pack (show s))
 
@@ -126,6 +136,14 @@ w4ToJSON sym a = do
   runReaderT f env
 
 newtype ExprEnv sym = ExprEnv (Map Integer (Some (W4.SymExpr sym)))
+
+-- | Serialize an expression binding environment
+serializeExprEnv :: forall sym. SerializableExprs sym => sym -> ExprEnv sym -> IO JSON.Value
+serializeExprEnv sym (ExprEnv env) = JSON.toJSON <$> do
+  forM (Map.toList env) $ \(i, Some (e :: W4.SymExpr sym tp)) -> do
+    e_json <- withSerializable (Proxy @sym) (Proxy @(W4.SymExpr sym)) (Proxy @tp) $ w4ToJSON sym e
+    return $ JSON.object [ "symbolic_ident" JSON..= i, "symbolic_expr" JSON..= e_json]
+
 
 mergeEnvs :: TestEquality (W4.SymExpr sym) => ExprEnv sym -> ExprEnv sym -> ExprEnv sym
 mergeEnvs (ExprEnv env1) (ExprEnv env2) = ExprEnv (
@@ -156,6 +174,18 @@ w4ToJSONEnv sym a = do
   c <- IO.readIORef cacheRef
   eenv <- cacheToEnv sym c
   return $ (v, eenv)
+
+emptyExprCache :: ExprCache sym
+emptyExprCache = ExprCache Map.empty
+
+w4ToJSONWithCache :: forall sym a. (W4.IsExprBuilder sym, SerializableExprs sym) => W4Serializable sym a => sym -> ExprCache sym -> a -> IO (JSON.Value, ExprCache sym)
+w4ToJSONWithCache sym init_cache a = do
+  cacheRef <- IO.newIORef init_cache
+  W4S f <- return $ w4Serialize @sym a
+  let env = W4SEnv cacheRef sym True
+  v <- runReaderT f env
+  c <- IO.readIORef cacheRef
+  return $ (v, c)
 
 class W4SerializableF sym (f :: k -> Type) where
   withSerializable :: Proxy sym -> p f -> q tp -> (W4Serializable sym (f tp) => a) -> a
@@ -243,8 +273,7 @@ instance (W4Serializable sym x) => W4Serializable sym [x] where
     xs_json <- mapM w4Serialize xs
     return $ JSON.toJSON xs_json
 
-instance W4Serializable sym JSON.Value where
-  w4Serialize = return
+instance W4Serializable sym JSON.Value
 
 instance (W4Serializable sym x, W4Serializable sym y) => W4Serializable sym (Map x y) where
   w4Serialize x = do
@@ -261,14 +290,13 @@ instance (SerializableExprs sym, W4Serializable sym x) => W4Serializable sym (W4
           W4P.PredDisjRepr -> "disj"
     object [ "predmap" .= objs, "kind" .= repr ]
 
-instance W4Serializable sym Integer where
-  w4Serialize i = return $ JSON.toJSON i
+instance W4Serializable sym Integer
+instance W4Serializable sym Int
+instance W4Serializable sym Text
+instance W4Serializable sym Bool
 
-instance W4Serializable sym Text where
-  w4Serialize i = return $ JSON.toJSON i
-
-instance W4Serializable sym Bool where
-  w4Serialize i = return $ JSON.toJSON i
+instance W4Serializable sym a => W4Serializable sym (Set a) where
+  w4Serialize a = w4Serialize (Set.toList a)
 
 instance W4Serializable sym a => W4Serializable sym (Maybe a) where
   w4Serialize = \case
