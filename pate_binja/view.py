@@ -3,6 +3,7 @@
 from __future__ import annotations
 import io
 import os.path
+import pprint
 import re
 from difflib import HtmlDiff
 from threading import Thread, Condition
@@ -22,7 +23,7 @@ from PySide6.QtCore import Qt, QCoreApplication
 from PySide6.QtGui import QMouseEvent, QAction, QColor, QPaintEvent
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
     QSplitter, QMenu, QTextEdit, QComboBox, QPushButton, QListWidget, QListWidgetItem, QAbstractItemView, \
-    QDialogButtonBox, QMessageBox
+    QDialogButtonBox, QMessageBox, QSpinBox
 
 from .mcad.PateMcad import PateMcad, CycleCount
 from . import pate
@@ -592,16 +593,13 @@ class PateTraceConstraintDialog(QDialog):
         for tv in self.traceVars:
             self.varComboBox.addItem(tv.pretty, userData=tv)
         varLabel = QLabel("Variable:")
-        varLabel.setBuddy(self.varComboBox)
 
         self.relComboBox = QComboBox()
         self.relComboBox.addItems(traceConstraintRelations)
         relLabel = QLabel("Relation:")
-        relLabel.setBuddy(self.relComboBox)
 
         self.intTextLine = QLineEdit()
         intLabel = QLabel("Integer:")
-        intLabel.setBuddy(self.intTextLine)
 
         addButton = QPushButton("Add")
         addButton.clicked.connect(lambda _: self.addConstraint())
@@ -910,6 +908,190 @@ class PateCfarInstTreeDialog(QDialog):
         self.setLayout(mainLayout)
 
 
+class PateWideningInfoDialog(QDialog):
+    def __init__(self, cfarNode: pate.CFARNode, label: str = None, parent=None):
+        super().__init__(parent)
+        self.resize(1100, 600)
+        self.setWindowTitle(f'WideningInfo')
+
+        self.cfarNode = None
+
+        # postdomain
+        self.postdomainText = QPlainTextEdit()
+        self.postdomainText.setReadOnly(True)
+        postdomainLayout = QVBoxLayout()
+        postdomainLayout.addWidget(QLabel('Postdomain:'))
+        postdomainLayout.addWidget(self.postdomainText)
+        postdomainWidget = QWidget()
+        postdomainWidget.setLayout(postdomainLayout)
+
+        # sharedEnv
+        self.sharedEnvText = QPlainTextEdit()
+        self.sharedEnvText.setReadOnly(True)
+        sharedEnvLayout = QVBoxLayout()
+        sharedEnvLayout.addWidget(QLabel('Shared Env:'))
+        sharedEnvLayout.addWidget(self.sharedEnvText)
+        sharedEnvWidget = QWidget()
+        sharedEnvWidget.setLayout(sharedEnvLayout)
+
+        # top - horizontal splitter with postdomain and sharedEnv
+        top = QSplitter(Qt.Orientation.Horizontal)
+        top.addWidget(postdomainWidget)
+        top.addWidget(sharedEnvWidget)
+
+        # Eq/val selector - pull down? Toggles?
+        self.eqValComboBox = QComboBox()
+        self.eqValComboBox.addItem('Equality')
+        self.eqValComboBox.addItem('Value')
+        self.eqValComboBox.currentIndexChanged.connect(self.eqValComboBoxTextChanged)
+        eqValSelect = QHBoxLayout()
+        eqValSelect.addWidget(QLabel('Select Domain Type:'))
+        eqValSelect.addWidget(self.eqValComboBox)
+        eqValSelect.addStretch()
+
+        # Locations
+        self.locList = QListWidget()
+        self.locList.currentItemChanged.connect(self.locListItemChanged)
+        locLayout = QVBoxLayout()
+        locLayout.addWidget(QLabel('Locations:'))
+        locLayout.addWidget(self.locList)
+
+        # middle - vbox with eq/val selector and loc splitter
+        middleLayout = QVBoxLayout()
+        middleLayout.addLayout(eqValSelect)
+        middleLayout.addLayout(locLayout)
+        middleWidget = QWidget()
+        middleWidget.setLayout(middleLayout)
+
+        # trace selector - pulldown? number?
+        self.traceSpinBox = QSpinBox()
+        self.traceSpinBox.setRange(1,1)
+        self.traceSpinBox.valueChanged.connect(self.traceSpinBoxValueChanged)
+        traceSelect = QHBoxLayout()
+        traceSelect.addWidget(QLabel('Select Trace:'))
+        traceSelect.addWidget(self.traceSpinBox)
+        traceSelect.addStretch()
+
+        # trace widget
+        self.traceWidget = TraceWidget(self)
+
+        # bottom - vbox with trace selector and trace widget
+        bottomLayout = QVBoxLayout()
+        bottomLayout.addLayout(traceSelect)
+        bottomLayout.addWidget(self.traceWidget)
+        bottomWidget = QWidget()
+        bottomWidget.setLayout(bottomLayout)
+
+        # Main Splitter (vertical)
+        mainSplitter = QSplitter(Qt.Orientation.Vertical)
+        mainSplitter.addWidget(top)
+        mainSplitter.addWidget(middleWidget)
+        mainSplitter.addWidget(bottomWidget)
+
+        # Main Layout
+        mainLayout = QHBoxLayout()
+        mainLayout.addWidget(mainSplitter)
+        self.setLayout(mainLayout)
+
+        self.setCfarNode(cfarNode)
+
+    def setCfarNode(self, cfarNode: pate.CFARNode):
+        self.cfarNode = cfarNode
+
+        # Default contents
+        self.setWindowTitle(f'WideningInfo - No CFAR Node')
+        self.postdomainText.setPlainText('None')
+        self.sharedEnvText.setPlainText('None')
+        self.locList.clear()
+        self.traceWidget.setTrace(None)
+
+        if cfarNode is None:
+            return
+
+        self.setWindowTitle(f'WideningInfo - {self.cfarNode.id}')
+
+        wInfo: Optional[pate.WideningInfo] = self.cfarNode.wideningInfo
+        if wInfo is None:
+            return
+
+        with io.StringIO() as out:
+            pate.pprint_domain(wInfo.postdomain, out=out)
+            self.postdomainText.setPlainText(out.getvalue())
+
+        with io.StringIO() as out:
+            pp = pprint.PrettyPrinter(indent=4, stream=out)
+            pp.pprint(self.cfarNode.wideningInfo.sharedEnv)
+            self.sharedEnvText.setPlainText(out.getvalue())
+
+        self.updateEqValSelection()
+
+    def updateEqValSelection(self):
+        self.locList.clear()
+        self.traceWidget.setTrace(None)
+
+        wInfo: Optional[pate.WideningInfo] = self.cfarNode.wideningInfo
+        if wInfo is None:
+            return
+
+        traceCollection = None
+        match self.eqValComboBox.currentText():
+            case 'Equality':
+                traceCollection = wInfo.equalityTraceCollection
+            case 'Value':
+                traceCollection = wInfo.valueTraceCollection
+
+        if traceCollection is None:
+            return
+
+        for (loc, traces) in traceCollection.regTraces:
+            locStr = pate.get_reg_desc(loc)
+            item = QListWidgetItem(locStr, self.locList)
+            item.setData(Qt.UserRole, traces)
+
+        for (loc, traces) in traceCollection.cellTraces:
+            locStr = str(loc)
+            #locStr = pate.get_mem_desc(m)
+            item = QListWidgetItem(locStr, self.locList)
+            item.setData(Qt.UserRole, traces)
+
+        self.updateTraces()
+
+    def updateTraces(self):
+        self.traceWidget.setTrace(None)
+
+        item = self.locList.currentItem()
+        if not item:
+            return
+
+        traces = item.data(Qt.UserRole)
+
+        self.traceSpinBox.setMaximum(len(traces))
+
+        self.updateTrace()
+
+    def updateTrace(self):
+        item = self.locList.currentItem()
+        if not item:
+            return
+
+        traces = item.data(Qt.UserRole)
+
+        traceIdx = self.traceSpinBox.value() - 1
+        trace = traces[traceIdx]
+
+        self.traceWidget.setTrace(trace)
+        print("updated trace")
+
+    def eqValComboBoxTextChanged(self, text):
+        self.updateEqValSelection()
+
+    def locListItemChanged(self, value):
+        self.updateTraces()
+
+    def traceSpinBoxValueChanged(self, value):
+        self.updateTrace()
+
+
 class MyFlowGraphWidget(FlowGraphWidget):
 
     pate_widget: PateWidget
@@ -1054,11 +1236,20 @@ class MyFlowGraphWidget(FlowGraphWidget):
                                                                          cfarNode.id))
                 menu.addAction(action)
 
+            if cfarNode.wideningInfo:
+                action = QAction('Show Widening Info', self)
+                action.triggered.connect(lambda _: self.showWideningInfoDialog(cfarNode))
+                menu.addAction(action)
+
             if menu.actions():
                 menu.exec_(event.globalPos())
 
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
         d = PateCfarEqCondDialog(cfarNode, parent=self)
+        d.show()
+
+    def showWideningInfoDialog(self, cfarNode: pate.CFARNode):
+        d = PateWideningInfoDialog(cfarNode, parent=self)
         d.show()
 
     def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):

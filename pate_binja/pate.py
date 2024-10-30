@@ -12,6 +12,7 @@ import shlex
 import signal
 import sys
 import threading
+from functools import reduce
 from json import JSONDecodeError, JSONEncoder, JSONDecoder
 from subprocess import Popen, PIPE, STDOUT, TimeoutExpired
 from typing import IO, Any, Optional
@@ -696,8 +697,12 @@ class TraceCollection:
         traceMap = []
         for kv in raw['map']:
             traces = [self.allTraces[ti] for ti in kv['val']]
-            traceMap.append({'location': kv['key'], 'traces': traces})
+            traceMap.append((kv['key'], traces))
         return traceMap
+
+    def maxNumTraces(self):
+        return max(reduce(max, map(lambda x: len(x[1]), self.regTraces)),
+                   reduce(max, map(lambda x: len(x[1]), self.cellTraces)))
 
 
 class WideningInfo:
@@ -758,8 +763,6 @@ class CFARNode:
             content = cw['content']
             if content and content.get('name') == 'Equivalence Counter-example Traces':
                 self.wideningInfo = WideningInfo(content)
-                pass
-
 
     def addExit(self, node: CFARNode) -> bool:
         """Add a block exit to node if new.
@@ -889,7 +892,7 @@ class TraceVar:
                 with io.StringIO() as out:
                     out.write(prefix)
                     out.write(" ")
-                    pprint_reg(self.raw, out=out)
+                    pprint_reg_op(self.raw, out=out)
                     self.pretty = out.getvalue()
                 self.type = self.raw['val']['offset']['type']
                 # TODO: parse numBits from type
@@ -1297,22 +1300,26 @@ def pprint_eq_domain(v, pre: str = '', out: IO = sys.stdout):
 
 def pprint_eq_domain_registers(v, pre: str = '', out: IO = sys.stdout):
     for m in v['map']:
-        if m.get('pred') == True:
+        if m.get('pred') is True:
             # TODO: does this apply to pre/post domains and trace conditions?
-            continue
-        if m['val'] != True:
-            match m['key']:
-                case {'arch_reg': name}:
-                    if name in {'PSTATE_C', 'PSTATE_V', 'PSTATE_N', 'PSTATE_Z'}:
-                        out.write(f'{pre}Register: {name}\n')
-                    else:
-                        continue
-                case {'reg': name}:
-                    out.write(f'{pre}Register: {name}\n')
-                case _:
-                    out.write(f'{pre}{m["key"]}\n')
-            if m['val'] != False:
-                out.write(f'{pre}val: {m["val"]}')
+            pass
+        elif m['val'] is not True:
+            name = get_reg_desc(m["key"])
+            if not name.startswith('_'):
+                out.write(f'{pre}Register: {get_reg_desc(m["key"])}')
+                if m['val']:
+                    out.write(f' val: {m["val"]}')
+                out.write('\n')
+
+
+def get_reg_desc(r):
+    match r:
+        case {'arch_reg': name}:
+            return str(name)
+        case {'reg': name}:
+            return str(name)
+        case _:
+            return str(r)
 
 
 def pprint_eq_domain_memory(mem_kind, pv, pre: str = '', out: IO = sys.stdout):
@@ -1398,15 +1405,15 @@ def pprint_event_trace(et: dict, pre: str = '', out: IO = sys.stdout):
 def pprint_event_trace_initial_reg(initial_regs: dict, pre: str = '', out: IO = sys.stdout):
     """Pretty print an event trace's initial registers."""
     out.write(f'{pre}Initial Register Values (non-zero):\n')
-    pprint_reg_op(initial_regs['reg_op'], pre + '  ', out, True)
+    pprint_reg_ops(initial_regs['reg_op'], pre + '  ', out, True)
 
 
-def pprint_reg_op(reg_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
+def pprint_reg_ops(reg_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
     for reg in reg_op['map']:
-        pprint_reg(reg, pre, out, prune_zero)
+        pprint_reg_op(reg, pre, out, prune_zero)
 
 
-def pprint_reg(reg: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
+def pprint_reg_op(reg: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
     val: dict = reg['val']
     ppval = get_value_id(val)
     key: dict = reg['key']
@@ -1430,7 +1437,7 @@ def pprint_reg(reg: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool 
                 out.write(f'{pre}{key} <- {ppval}\n')
 
 
-def pprint_memory_op(memory_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
+def pprint_memory_ops(memory_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero: bool = False):
     if memory_op.get('mem_op'):
         pprint_mem_op(memory_op['mem_op'], pre, out, prune_zero)
     elif memory_op.get('external_call'):
@@ -1471,9 +1478,9 @@ def pprint_event_trace_instructions(events: dict, pre: str = '', out: IO = sys.s
             out.write(f'{pre}  {get_addr_id(e["instruction_addr"])}\n')
             for op in e['events']:
                 if op.get('memory_op'):
-                    pprint_memory_op(op['memory_op'], pre + '    ', out)
+                    pprint_memory_ops(op['memory_op'], pre + '    ', out)
                 elif op.get('register_op'):
-                    pprint_reg_op(op['register_op']['reg_op'], pre + '    ', out)
+                    pprint_reg_ops(op['register_op']['reg_op'], pre + '    ', out)
 
 
 def pprint_node_inst_tree(inst_tree, pre: str = '', out: IO = sys.stdout):
