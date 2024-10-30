@@ -395,6 +395,11 @@ forBinsC f = forBins $ \bin -> Const <$> f bin
 
 newtype LiftF (t :: l -> DK.Type) (f :: k -> l) (tp :: k) = LiftF { unLiftF :: (t (f tp)) }
 
+instance Show (t (f tp)) => Show (LiftF t f tp) where
+  show (LiftF x) = show x 
+
+instance (forall tp. Show (t (f tp))) => ShowF (LiftF t f)
+
 -- | Specialization of 'PatchPair' to lift inner types over the 'bin' parameter.
 type PatchPairF t tp = PatchPair (LiftF t tp)
 
