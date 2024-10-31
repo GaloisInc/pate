@@ -654,14 +654,13 @@ currentAsm = CMR.asks envCurrentFrame
 
 withFreshScope ::
   forall sym arch f.
-  Scoped f =>
   PB.BlockPair arch ->
-  (forall v. SimScope sym arch v -> EquivM sym arch (f v)) ->
-  EquivM sym arch (SimSpec sym arch f)
+  (forall v. SimScope sym arch v -> EquivM sym arch f) ->
+  EquivM sym arch f
 withFreshScope bPair f = do
   dummy_spec <- withFreshVars @sym @arch @(WithScope ()) bPair $ \_ -> do
     return (mempty, WithScope ())
-  forSpec dummy_spec $ \scope _ -> f scope
+  fmap (\x -> viewSpecBody x unWS) $ forSpec dummy_spec $ \scope _ -> WithScope <$> f scope
 
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
