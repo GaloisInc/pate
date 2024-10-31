@@ -742,7 +742,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
           sne_other <- PPa.get bin_other snePair
           let nd = GraphNode $ singleToNodeEntry sne
           domSpec <- evalPG pg $ getCurrentDomainM nd
-          (_, dom) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) domSpec
+          dom <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) domSpec
           (SingleBundle bundle binds) <- PPa.get bin bundles
           withTracing @"node" nd $ do
             emitTraceLabel @"domain" PAD.Predomain (Some dom)
@@ -849,11 +849,10 @@ pairGraphComputeFixpoint entries gr_init = do
                 d' <- asks (PCfg.cfgStackScopeAssume . envConfig) >>= \case
                   True -> strengthenStackDomain scope d
                   False -> return d
-                withAssumptionSet (PS.scopeAsm scope) $ do
-                  gr2 <- addRefinementChoice nd gr1
-                  gr3 <- visitNode scope wi d' gr2
-                  emitEvent $ PE.VisitedNode nd
-                  return gr3
+                gr2 <- addRefinementChoice nd gr1
+                gr3 <- visitNode scope wi d' gr2
+                emitEvent $ PE.VisitedNode nd
+                return gr3
       case mgr4 of
         Just gr4 -> go gr4
         Nothing -> return gr0
@@ -953,7 +952,7 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
         Nothing -> case getCondition pg nd ConditionEquiv of
           Just cond_spec -> subTrace nd $ withSym $ \sym -> do
             withFreshScope (graphNodeBlocks nd) $ \scope -> do
-              (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
+              cond <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
               fmap fst $ withGraphNode scope nd pg $ \bundle d -> do
                 cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
                 eqCond_pred <- PEC.toPred sym cond_simplified
@@ -1046,7 +1045,7 @@ withGraphNode scope nd pg f = withSym $ \sym -> do
     Nothing | GraphNode ne <- nd -> throwHere $ PEE.MissingDomainForBlock (nodeBlocks ne)
     Nothing | ReturnNode nr <- nd -> throwHere $ PEE.MissingDomainForFun (nodeFuns nr)
     Just dom_spec ->  do
-      (_, d) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) dom_spec
+      d <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) dom_spec
       case nd of
         GraphNode ne -> withAbsDomain ne d pg $ withValidInit scope (nodeBlocks ne) $
           withSimBundle pg (PS.scopeVars scope) ne $ \bundle ->

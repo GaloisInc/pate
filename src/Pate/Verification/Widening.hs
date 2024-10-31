@@ -177,9 +177,7 @@ getEquivPostCondition scope bundle to condK gr = withSym $ \sym -> do
   -- this condition is *implied* by the 'from' equivalence condition and equivalence domain
   let outVars = PS.bundleOutVars scope bundle
   case getCondition gr to condK of
-    Just condSpec -> do
-      (_asm, cond) <- liftIO $ PS.bindSpec sym outVars condSpec
-      return cond
+    Just condSpec -> liftIO $ PS.bindSpec sym outVars condSpec
     Nothing -> return $ PEC.universal sym
 
 extractPtrs ::
@@ -427,7 +425,7 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
       env <- CMR.ask
       let conds = Map.fromList $ mapMaybe (\condK -> case getCondition gr2 nd condK of {Just eqSpec -> Just (condK, eqSpec); Nothing -> Nothing}) [minBound..maxBound]
 
-      conds' <- mapM (\spec -> snd <$> (liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec)) conds
+      conds' <- mapM (\spec -> (liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec)) conds
       let b = InteractiveBundle scope bundle nd gr2 d conds' env
       -- TODO: allow updates here
       emitTrace @"interactiveBundle" b
@@ -435,7 +433,7 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
     choice "Strengthen conditions" $ \(TupleF3 scope bundle d) gr2 -> withSym $ \sym -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
             Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
-              (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
+              eqCond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
               eqCond' <- strengthenCondition eqCond
               priority <- thisPriority
               let propK = getPropagationKind gr0_ nd condK
@@ -446,7 +444,7 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
     choice "Simplify conditions" $ \(TupleF3 scope _bundle _) gr2 -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
             Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
-              (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
+              eqCond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
               eqCond_pred <- PEC.toPred sym eqCond
               emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
               meqCond_pred' <- isPredTrue' goalTimeout eqCond_pred >>= \case
@@ -990,33 +988,32 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
             -- values of the slice again. This is accomplised by 'abstractOverVars', which
             -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
             -- from the current scope and can be stored as the updated domain in the 'PairGraph'
-            (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars scope bundle) postSpec
-            withAssumptionSet asm $ do
-              md <- widenPostcondition scope bundle d d'
-              case md of
-                NoWideningRequired ->
-                  do traceBundle bundle "Did not need to widen"
-                     emitTraceLabel @"domain" PAD.Postdomain (Some d')
-                     finalizeGraphEdge scope bundle d d' from to gr
+            d' <- liftIO $ PS.bindSpec sym (PS.bundleOutVars scope bundle) postSpec
+            md <- widenPostcondition scope bundle d d'
+            case md of
+              NoWideningRequired -> do
+                traceBundle bundle "Did not need to widen"
+                emitTraceLabel @"domain" PAD.Postdomain (Some d')
+                finalizeGraphEdge scope bundle d d' from to gr
 
-                WideningError msg _ d'' ->
-                  do let msg' = ("Error during widening: " ++ msg)
-                     err <- emitError' (PEE.WideningError msg')
-                     postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                     case updateDomain gr from to postSpec' (priority PriorityWidening) of
-                       Left gr' ->
-                         do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                            return $ recordMiscAnalysisError gr' to err
-                       Right gr' -> return $ recordMiscAnalysisError gr' to err
+              WideningError msg _ d'' -> do
+                let msg' = ("Error during widening: " ++ msg)
+                err <- emitError' (PEE.WideningError msg')
+                postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                case updateDomain gr from to postSpec' (priority PriorityWidening) of
+                  Left gr' -> do
+                    traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
+                    return $ recordMiscAnalysisError gr' to err
+                  Right gr' -> return $ recordMiscAnalysisError gr' to err
 
-                Widen _ _ d'' -> do
-                  emitTraceLabel @"domain" PAD.Postdomain (Some d'')
-                  postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                  case updateDomain gr from to postSpec' (priority PriorityWidening) of
-                    Left gr' -> do
-                      do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                         finalizeGraphEdge scope bundle d d'' from to gr'
-                    Right gr' -> finalizeGraphEdge scope bundle d d'' from to gr'
+              Widen _ _ d'' -> do
+                emitTraceLabel @"domain" PAD.Postdomain (Some d'')
+                postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                case updateDomain gr from to postSpec' (priority PriorityWidening) of
+                  Left gr' -> do
+                    traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
+                    finalizeGraphEdge scope bundle d d'' from to gr'
+                  Right gr' -> finalizeGraphEdge scope bundle d d'' from to gr'
 
 
 finalizeGraphEdge ::

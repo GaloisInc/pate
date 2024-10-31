@@ -45,7 +45,6 @@ module Pate.SimState
   , type VarScope
   , type GlobalScope
   , SimScope
-  , scopeAsm
   , scopeVars
   , scopeVarsPair
   , Scoped(..)
@@ -295,15 +294,14 @@ data SimScope sym arch v =
       -- variables for both binaries
       scopeBoundVarsO :: SimBoundVars sym arch v PBi.Original
     , scopeBoundVarsP :: SimBoundVars sym arch v PBi.Patched
-    , scopeAsm :: AssumptionSet sym
     }
 
 instance Scoped (SimScope sym arch)
 instance Scoped (Const x)
 
 instance PEM.ExprFoldableF sym (MM.ArchReg arch) => PEM.ExprFoldable sym (SimScope sym arch v) where
-  foldExpr sym f (SimScope varsO varsP asm) b =
-    PEM.foldExpr sym f varsO b >>= PEM.foldExpr sym f varsP >>= PEM.foldExpr sym f asm
+  foldExpr sym f (SimScope varsO varsP) b =
+    PEM.foldExpr sym f varsO b >>= PEM.foldExpr sym f varsP
 
 scopeBoundVars :: SimScope sym arch v -> PPa.PatchPair (SimBoundVars sym arch v)
 scopeBoundVars scope = PPa.PatchPair (scopeBoundVarsO scope) (scopeBoundVarsP scope)
@@ -331,7 +329,7 @@ freshSimSpec ::
   -- | Fresh base region
   (forall bin v. PBi.WhichBinaryRepr bin -> m (ScopedExpr sym W4.BaseIntegerType v)) ->
   -- | Produce the body of the 'SimSpec' given the initial variables
-  (forall v. (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched) -> m (AssumptionSet sym, (f v))) ->
+  (forall v. (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched) -> m (f v)) ->
   m (SimSpec sym arch f)
 freshSimSpec mkReg mkMem mkStackBase mkMaxregion mkBody = do
   vars <- PPa.forBins $ \bin -> do
@@ -342,8 +340,8 @@ freshSimSpec mkReg mkMem mkStackBase mkMaxregion mkBody = do
     mr <- mkMaxregion bin
     return $ SimBoundVars regs (SimState mem (MM.mapRegsWith (\_ -> PSR.macawVarEntry) regs) sb scb mr)
   (varsO, varsP) <- PPa.asTuple vars
-  (asm, body) <- mkBody (boundVarsAsFree varsO, boundVarsAsFree varsP)
-  return $ SimSpec (SimScope varsO varsP asm) body
+  body <- mkBody (boundVarsAsFree varsO, boundVarsAsFree varsP)
+  return $ SimSpec (SimScope varsO varsP) body
 
 -- | Project out the body with an arbitrary scope.
 viewSpecBody ::
@@ -762,12 +760,10 @@ bindSpec ::
   (SimVars sym arch v PBi.Original,
   SimVars sym arch v PBi.Patched) ->
   SimSpec sym arch f ->
-  IO (AssumptionSet sym, f v)
-bindSpec sym vals (SimSpec scope@(SimScope _ _ asm) (body :: f v')) = do
+  IO (f v)
+bindSpec sym vals (SimSpec scope@(SimScope _ _) (body :: f v')) = do
   rew <- getScopeCoercion sym scope vals
-  body' <- scopedExprMap sym body (applyScopeCoercion sym rew)
-  asm' <- unWS <$> scopedExprMap sym (WithScope @_ @v' asm) (applyScopeCoercion sym rew)
-  return $ (asm', body')
+  scopedExprMap sym body (applyScopeCoercion sym rew)
 
 
 ------------------------------------

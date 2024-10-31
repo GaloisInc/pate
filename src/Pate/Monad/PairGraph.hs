@@ -205,14 +205,11 @@ initialDomainSpec ::
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 initialDomainSpec (GraphNodeEntry blocks) = withTracing @"function_name" "initialDomainSpec" $ 
-  withFreshVars blocks $ \_vars -> do
-    dom <- initialDomain
-    return (mempty, dom)
+  withFreshVars blocks $ \_vars -> initialDomain
 initialDomainSpec (GraphNodeReturn fPair) = withTracing @"function_name" "initialDomainSpec" $ do
   let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair
-  withFreshVars blocks $ \_vars -> do
-    dom <- initialDomain
-    return (mempty, dom)
+  withFreshVars blocks $ \_vars -> initialDomain
+
 
 getScopedCondition ::
   PS.SimScope sym arch v ->
@@ -222,7 +219,7 @@ getScopedCondition ::
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
 getScopedCondition scope pg nd condK = withSym $ \sym -> case getCondition pg nd condK of
   Just condSpec -> do
-    (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
+    eqCond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
     return eqCond
   Nothing -> return $ PEC.universal sym
 
