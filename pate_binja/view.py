@@ -1049,8 +1049,7 @@ class PateWideningInfoDialog(QDialog):
             item.setData(Qt.UserRole, traces)
 
         for (loc, traces) in traceCollection.cellTraces:
-            locStr = str(loc)
-            #locStr = pate.get_mem_desc(m)
+            locStr = wInfo.prettyLoc(loc)
             item = QListWidgetItem(locStr, self.locList)
             item.setData(Qt.UserRole, traces)
 

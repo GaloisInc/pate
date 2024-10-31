@@ -723,6 +723,17 @@ class WideningInfo:
                     self.equalityTraceCollection = TraceCollection('Equality', ltv['value'])
             self.sharedEnv = raw['shared_env']
 
+    def prettyLoc(self, loc: dict) -> str:
+        id = loc.get('ptr',{}).get('offset',{}).get('symbolic_ident')
+        if not id:
+            return '1 ' + str(loc)
+        matches = [x['symbolic_expr'] for x in self.sharedEnv if x['symbolic_ident'] == id]
+        if not matches:
+            return '2 ' + str(loc)
+        with io.StringIO() as out:
+            pprint_symbolic(out, matches[0])
+            return out.getvalue()
+
 
 class CFARNode:
     exits: list[CFARNode]
@@ -1842,6 +1853,7 @@ def run_pate_demo():
     replay = file.endswith('.replay')
     user = TtyUserInteraction(not replay)
     pate = PateWrapper(file, user)
+    #pate.debug_cfar = True
     pate.run()
 
 
