@@ -552,7 +552,7 @@ initFnBindings sym scope sne pg = do
   let pg' = pg & (syncData dp . syncStates) %~ MapF.insert sne st_global
   binds' <- case MapF.lookup sne (pg' ^. (syncData dp . syncBindings)) of
     Just (PS.AbsT bindsSpec_prev) -> do
-      (_, binds_prev) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
+      binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
       -- bindings cannot clash, since they are fresh, so the mux condition doesn't matter
       true_ <- PS.concreteScope sym (W4.ConcreteBool True)
       PFn.merge sym true_ binds binds_prev
