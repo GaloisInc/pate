@@ -114,8 +114,9 @@ type FnBindingsSpec sym arch = PS.AbsT (PS.SimSpec sym arch) (FnBindings sym)
 
 instance PS.Scoped (FnBindings sym bin) 
 
--- | Transform the given value to be globally-scoped by replacing its internal expressions
---   with uninterpreted functions
+-- | Transform the given value to be globally-scoped by replacing its internal symbolic expressions
+--   with uninterpreted functions. Concrete expressions are left unmodified as they are
+--   valid in any scope.
 init ::
   W4.IsSymExprBuilder sym =>
   PS.Scoped f =>
@@ -130,12 +131,14 @@ mkFreshFns ::
   sym ->
   PS.ScopedExpr sym tp v ->
   StateT (FnBindings sym bin v) IO (PS.ScopedExpr sym tp PS.GlobalScope)
-mkFreshFns sym_ e_scoped = do
-  (PS.PopT fn, e_global) <- lift $ PS.liftScope0Ret sym_ $ \sym -> do
-    v <- W4.freshConstant sym W4.emptySymbol (W4.exprType (PS.unSE e_scoped))
-    return (PS.PopT (BoundFn v), v)
-  modify $ \(FnBindings binds s) -> FnBindings (MapF.insert fn (PS.PopScope e_scoped) binds) s
-  return e_global
+mkFreshFns sym_ e_scoped = case W4.asConcrete (PS.unSE e_scoped) of
+  Just c -> lift $ PS.concreteScope sym_ c
+  Nothing -> do
+    (PS.PopT fn, e_global) <- lift $ PS.liftScope0Ret sym_ $ \sym -> do
+      v <- W4.freshConstant sym W4.emptySymbol (W4.exprType (PS.unSE e_scoped))
+      return (PS.PopT (BoundFn v), v)
+    modify $ \(FnBindings binds s) -> FnBindings (MapF.insert fn (PS.PopScope e_scoped) binds) s
+    return e_global
 
 -- | Merge the two given function bindings, muxing the individual bindings
 --   with the given predicate (i.e. path condition) in the case of 
