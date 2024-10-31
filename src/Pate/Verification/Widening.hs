@@ -799,7 +799,7 @@ isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- rewrite the free variables for the other binary into arbitrary (free) terms and
   -- determine if the resulting predicate is equal to the original
-  fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope blks $ \(scope2 :: PS.SimScope sym arch v2) -> do
+  withFreshScope blks $ \(scope2 :: PS.SimScope sym arch v2) -> do
     (this_vars :: PS.SimVars sym arch v2 bin) <- PPa.get bin (PS.scopeVars (PS.unsafeCoerceScope scope))
     (vars2 :: PS.SimVars sym arch v2 (PBi.OtherBinary bin)) <- PPa.get (PBi.flipRepr bin) (PS.scopeVars scope2)
 
@@ -809,7 +809,7 @@ isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
     eqCond_pred <- PEC.toPred sym eqCond
     eqCond2_pred <- PEC.toPred sym eqCond2
     conds_eq <- liftIO $ W4.isEq sym eqCond_pred eqCond2_pred
-    PS.WithScope <$> isPredTrue' goalTimeout conds_eq
+    isPredTrue' goalTimeout conds_eq
 
 
 

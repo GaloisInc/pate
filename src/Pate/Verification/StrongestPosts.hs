@@ -723,7 +723,8 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
   let syncNode = GraphNode syncNodeEntry
 
   let snePair = PPa.PatchPair sneO sneP
-  pg1 <- fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope blkPair $ \(scope :: PS.SimScope sym arch v) -> fmap PS.WithScope $ do
+
+  pg1 <- withFreshScope blkPair $ \(scope :: PS.SimScope sym arch v) -> do
     (bundles, pg') <- mergeBundles scope snePair pg
     let pre_refines = getDomainRefinements syncNode pg
 
@@ -951,7 +952,7 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
             Nothing -> return rs
         Nothing -> case getCondition pg nd ConditionEquiv of
           Just cond_spec -> subTrace nd $ withSym $ \sym -> do
-            spec <- withFreshScope (graphNodeBlocks nd) $ \scope -> fmap PS.WithScope $ do
+            withFreshScope (graphNodeBlocks nd) $ \scope -> do
               (_,cond) <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) cond_spec
               fmap fst $ withGraphNode scope nd pg $ \bundle d -> do
                 cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
@@ -974,7 +975,6 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
                 rest scope ieqc >>= \case
                   Just fcond -> return (rs { eqCondFinals = Map.insert nd fcond (eqCondFinals rs), eqCondInterims = interims }, pg)
                   Nothing -> return (rs { eqCondInterims = interims }, pg)
-            return $ PS.viewSpecBody spec PS.unWS
           Nothing -> return rs
 
     go :: EqCondCollector sym arch -> EquivM sym arch (EqCondCollector sym arch)
