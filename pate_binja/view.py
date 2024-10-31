@@ -916,28 +916,31 @@ class PateWideningInfoDialog(QDialog):
 
         self.cfarNode = None
 
-        # postdomain
-        self.postdomainText = QPlainTextEdit()
-        self.postdomainText.setReadOnly(True)
-        postdomainLayout = QVBoxLayout()
-        postdomainLayout.addWidget(QLabel('Postdomain:'))
-        postdomainLayout.addWidget(self.postdomainText)
-        postdomainWidget = QWidget()
-        postdomainWidget.setLayout(postdomainLayout)
+        self.debugMode = False
 
-        # sharedEnv
-        self.sharedEnvText = QPlainTextEdit()
-        self.sharedEnvText.setReadOnly(True)
-        sharedEnvLayout = QVBoxLayout()
-        sharedEnvLayout.addWidget(QLabel('Shared Env:'))
-        sharedEnvLayout.addWidget(self.sharedEnvText)
-        sharedEnvWidget = QWidget()
-        sharedEnvWidget.setLayout(sharedEnvLayout)
+        if self.debugMode:
+            # postdomain
+            self.postdomainText = QPlainTextEdit()
+            self.postdomainText.setReadOnly(True)
+            postdomainLayout = QVBoxLayout()
+            postdomainLayout.addWidget(QLabel('Postdomain:'))
+            postdomainLayout.addWidget(self.postdomainText)
+            postdomainWidget = QWidget()
+            postdomainWidget.setLayout(postdomainLayout)
 
-        # top - horizontal splitter with postdomain and sharedEnv
-        top = QSplitter(Qt.Orientation.Horizontal)
-        top.addWidget(postdomainWidget)
-        top.addWidget(sharedEnvWidget)
+            # sharedEnv
+            self.sharedEnvText = QPlainTextEdit()
+            self.sharedEnvText.setReadOnly(True)
+            sharedEnvLayout = QVBoxLayout()
+            sharedEnvLayout.addWidget(QLabel('Shared Env:'))
+            sharedEnvLayout.addWidget(self.sharedEnvText)
+            sharedEnvWidget = QWidget()
+            sharedEnvWidget.setLayout(sharedEnvLayout)
+
+            # top - horizontal splitter with postdomain and sharedEnv
+            top = QSplitter(Qt.Orientation.Horizontal)
+            top.addWidget(postdomainWidget)
+            top.addWidget(sharedEnvWidget)
 
         # Eq/val selector - pull down? Toggles?
         self.eqValComboBox = QComboBox()
@@ -984,7 +987,8 @@ class PateWideningInfoDialog(QDialog):
 
         # Main Splitter (vertical)
         mainSplitter = QSplitter(Qt.Orientation.Vertical)
-        mainSplitter.addWidget(top)
+        if self.debugMode:
+            mainSplitter.addWidget(top)
         mainSplitter.addWidget(middleWidget)
         mainSplitter.addWidget(bottomWidget)
 
@@ -1000,8 +1004,9 @@ class PateWideningInfoDialog(QDialog):
 
         # Default contents
         self.setWindowTitle(f'WideningInfo - No CFAR Node')
-        self.postdomainText.setPlainText('None')
-        self.sharedEnvText.setPlainText('None')
+        if self.debugMode:
+            self.postdomainText.setPlainText('None')
+            self.sharedEnvText.setPlainText('None')
         self.locList.clear()
         self.traceWidget.setTrace(None)
 
@@ -1014,14 +1019,15 @@ class PateWideningInfoDialog(QDialog):
         if wInfo is None:
             return
 
-        with io.StringIO() as out:
-            pate.pprint_domain(wInfo.postdomain, out=out)
-            self.postdomainText.setPlainText(out.getvalue())
+        if self.debugMode:
+            with io.StringIO() as out:
+                pate.pprint_domain(wInfo.postdomain, out=out)
+                self.postdomainText.setPlainText(out.getvalue())
 
-        with io.StringIO() as out:
-            pp = pprint.PrettyPrinter(indent=4, stream=out)
-            pp.pprint(self.cfarNode.wideningInfo.sharedEnv)
-            self.sharedEnvText.setPlainText(out.getvalue())
+            with io.StringIO() as out:
+                pp = pprint.PrettyPrinter(indent=4, stream=out)
+                pp.pprint(self.cfarNode.wideningInfo.sharedEnv)
+                self.sharedEnvText.setPlainText(out.getvalue())
 
         self.updateEqValSelection()
 
