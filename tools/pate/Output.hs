@@ -67,10 +67,11 @@ data Output = Output
   { outputC :: Output_
   , output_this :: Maybe (PP.Doc ())
   , output_tag :: Maybe (Text.Text)
+  , output_blocked :: Bool
   }
 
 output :: Output_ -> Output
-output o = Output o Nothing Nothing
+output o = Output o Nothing Nothing False
 
 jsonOutputHandle :: IO.IORef (Maybe IO.Handle)
 jsonOutputHandle = IO.unsafePerformIO (IO.newIORef Nothing)
@@ -147,8 +148,8 @@ ppOutputElem nd =
         _ -> p'
   in PP.pretty (outIdx nd) <> ":" <+> (PP.indent (outIndent nd) p'')
 
-tagOutput :: Maybe (PP.Doc ()) -> Maybe (Text.Text) -> Output -> Output
-tagOutput msg tag o = Output (outputC o) msg tag
+tagOutput :: Maybe (PP.Doc ()) -> Maybe (Text.Text) -> Bool -> Output -> Output
+tagOutput msg tag isBlocked o = Output (outputC o) msg tag isBlocked
 
 ppOutput_ :: Output_ -> [PP.Doc ()]
 ppOutput_ (OutputElemList es) = map ppOutputElem es
@@ -159,8 +160,8 @@ ppOutput_ (OutputPrompt str) = [PP.pretty str]
 ppOutput_ OutputHeartbeat = ["."]
 
 ppOutput :: Output -> PP.Doc ()
-ppOutput (Output out_ Nothing _) = PP.vsep $ ppOutput_ out_
-ppOutput (Output out_ (Just this_) _) = PP.vsep $ this_:(ppOutput_ out_)
+ppOutput (Output out_ Nothing _ _) = PP.vsep $ ppOutput_ out_
+ppOutput (Output out_ (Just this_) _ _) = PP.vsep $ this_:(ppOutput_ out_)
 
 {-
 mkJSON' :: [OutputElem] -> ([JSON.Value], [OutputElem])
@@ -202,13 +203,14 @@ outputElemJSON e =
     ]
 
 jsonOutput :: Output -> JSON.Value
-jsonOutput (Output out_ this_ tag_) =
+jsonOutput (Output out_ this_ tag_ isBlocked) =
   case out_ of
     OutputElemList es | Just this__ <- this_ ->
       JSON.object
         [ "this" JSON..= show this__
         , "trace_node_kind" JSON..= tag_
         , "trace_node_contents" JSON..= map outputElemJSON es
+        , "trace_node_blocked" JSON..= isBlocked
         ]
     OutputElemList es -> JSON.toJSON $ map outputElemJSON es
     OutputInfo msg -> JSON.object ["message" JSON..= show msg]

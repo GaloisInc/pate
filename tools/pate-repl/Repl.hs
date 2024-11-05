@@ -524,8 +524,9 @@ ls' = do
   p <- prettyNextNodes 0 False
   (Some ((TraceNode lbl v _) :: TraceNode sym arch nm)) <- gets replNode
   tags <- gets replTags
+  blocked <- isBlocked
   let thisPretty = prettyDetailAt @'(sym, arch) @nm tags lbl v
-  let p' = PO.tagOutput (Just thisPretty) (Just (symbolRepr (knownSymbol @nm))) p
+  let p' = PO.tagOutput (Just thisPretty) (Just (symbolRepr (knownSymbol @nm))) blocked p 
   PO.printOutput p'
   PO.printBreak
 
