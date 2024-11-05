@@ -48,6 +48,7 @@ data OutputElem =
     , outDuration :: Maybe (PP.Doc ())
     , outPP :: PP.Doc ()
     , outJSON :: JSON.Value
+    , outIsBlocked :: Bool
     , outSuffix :: Maybe (PP.Doc ())
     , outMoreResults :: Bool
     -- ^ more results at this nesting level that were omitted
@@ -194,6 +195,7 @@ outputElemJSON e =
     [ "index" .= outIdx e
     , "indent" .= outIndent e
     , "finished" .= outFinished e
+    , "blocked" .= outIsBlocked e
     , "pretty" .= show (outPP e)
     , "content" .= outJSON e
     , "more" .= outMoreResults e
