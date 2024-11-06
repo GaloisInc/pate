@@ -35,6 +35,7 @@ module Pate.Verification.Widening
   , strengthenPredicate
   , getTraceFootprint
   , propagateCondition
+  , propagateOne
   ) where
 
 import           GHC.Stack
@@ -809,13 +810,57 @@ isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
     conds_eq <- liftIO $ W4.isEq sym eqCond_pred eqCond2_pred
     isPredTrue' goalTimeout conds_eq
 
-
+-- | Propagate the given condition kind backwards (from 'to' node to 'from' node).
+--   Does not do any other graph maintenance (i.e. dropping stale domains or re-queuing nodes)
+propagateOne ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  ConditionKind ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
+  Nothing -> do
+    emitTrace @"debug" "No condition to propagate"
+    return Nothing
+  Just{} -> do
+    -- take the condition of the target edge and bind it to
+    -- the output state of the bundle
+    cond_ <- getEquivPostCondition scope bundle to condK gr0
+    simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
+    cond <- PSi.applySimplifier simplifier cond_
+        -- check if the "to" condition is already satisifed, otherwise
+        -- we need to update our own condition
+    cond_pred <- PEC.toPred sym cond
+    goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+    isPredSat' goalTimeout cond_pred >>= \case
+      Just False -> do
+        emitTrace @"message" "Condition is infeasible, dropping branch."
+        Just <$> pruneCurrentBranch scope (from,to) condK gr0
+      _ | not (shouldPropagate (getPropagationKind gr0 to condK)) -> do
+        emitTrace @"debug" "Condition not propagated"
+        return Nothing
+      _ -> do
+        not_cond <- liftIO $ W4.notPred sym cond_pred
+        isPredSat' goalTimeout not_cond >>= \case
+          -- equivalence condition for this path holds, we 
+          -- don't need any changes
+          Just False -> do
+            emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+            return Nothing
+          -- we need more assumptions for this condition to hold
+          Just True -> do
+            emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
+            let propK = getPropagationKind gr0 to condK
+            gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr0
+            return $ Just $ (markEdge from to gr1)
+          Nothing -> throwHere $ PEE.InconclusiveSAT
 
 -- | Push an assertion back up the graph.
 --   Returns 'Nothing' if there is nothing to do (i.e. no assertion or
 --   existing assertion is already implied)
-
-
 propagateCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
@@ -832,64 +877,13 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
     False -> return Nothing
     True -> return $ Just gr3
   where
-    go condK gr = withSym $ \sym -> do
-      case getCondition gr to condK of
-        -- no target equivalence condition, nothing to do
-        Nothing -> do
-          emitTrace @"debug" "No condition to propagate"
-          return Nothing
-        Just{} -> do
-          -- take the condition of the target edge and bind it to
-          -- the output state of the bundle
-          cond_ <- getEquivPostCondition scope bundle to condK gr
-          simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
-          cond <- PSi.applySimplifier simplifier cond_
-{-
-
-
-          let blks = graphNodeBlocks from
-          skip <- case (blks, graphNodeBlocks to) of
-            -- this is a synchronization edge, so we attempt to filter the equivalence condition
-            -- based on whether or not it has variables scoped to only the other side of the analysis
-            -- FIXME: we can likely do better than this and formally separate the conditions, but
-            -- this is sufficient for now, and avoids the obvious case
-            (PPa.PatchPairSingle bin _,PPa.PatchPair{}) -> isEqCondSingleSided scope blks (PBi.flipRepr bin) cond
-            _ -> return False
-          case skip of
-            True -> do
-              emitTrace @"message" "Skipping single-sided propagation"
-              return Nothing
-            False -> do
--}
-              -- check if the "to" condition is already satisifed, otherwise
-              -- we need to update our own condition
-          cond_pred <- PEC.toPred sym cond
-          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-          isPredSat' goalTimeout cond_pred >>= \case
-            Just False -> do
-              emitTrace @"message" "Condition is infeasible, dropping branch."
-              Just <$> pruneCurrentBranch scope (from,to) condK gr
-            _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
-              emitTrace @"debug" "Condition not propagated"
-              return Nothing
-            _ -> do
-              not_cond <- liftIO $ W4.notPred sym cond_pred
-              isPredSat' goalTimeout not_cond >>= \case
-                -- equivalence condition for this path holds, we 
-                -- don't need any changes
-                Just False -> do
-                  emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
-                  return Nothing
-                -- we need more assumptions for this condition to hold
-                Just True -> do
-                  priority <- thisPriority
-                  emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
-                  let propK = getPropagationKind gr to condK
-                  gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
-                  return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
-                    queueNode (priority PriorityNodeRecheck) from $ 
-                    dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
-                Nothing -> throwHere $ PEE.InconclusiveSAT
+    go condK gr = propagateOne scope bundle from to condK gr >>= \case
+      Nothing -> return Nothing
+      Just gr' -> do
+        priority <- thisPriority
+        return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
+          queueNode (priority PriorityNodeRecheck) from $ 
+          dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr')
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,

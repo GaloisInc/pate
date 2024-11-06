@@ -136,6 +136,7 @@ module Pate.Verification.PairGraph
   , queueExitMerges
   , setPropagationKind
   , initFnBindings
+  , addFnBindings
   ) where
 
 import           Prettyprinter
@@ -533,6 +534,26 @@ getSingleNodeData ::
 getSingleNodeData lens sne =
   getPG $ syncDataSet (singleNodeDivergePoint sne) (singleEntryBin sne) lens
 
+addFnBindings ::
+  sym ~ W4B.ExprBuilder s st fs =>
+  PA.ValidArch arch =>
+  sym ->
+  PS.SimScope sym arch v ->
+  SingleNodeEntry arch bin ->
+  PFn.FnBindings sym bin v ->
+  PairGraph sym arch ->
+  IO (PFn.FnBindings sym bin v, PairGraph sym arch)
+addFnBindings sym scope sne binds pg = case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+  Just (PS.AbsT bindsSpec_prev) -> do
+    binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
+    -- FIXME: check for clashes?
+    true_ <- PS.concreteScope sym (W4.ConcreteBool True)
+    binds' <- PFn.merge sym true_ binds binds_prev
+    return $ (binds', pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds'))
+  Nothing -> return $ (binds, pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds))
+  where
+    dp = singleNodeDivergence sne
+
 
 -- | Retrieve the final state that binds the given scope to instead be
 --   "globally" scoped (i.e. scoped to the variables at the point of divergence).
@@ -541,24 +562,26 @@ getSingleNodeData lens sne =
 initFnBindings ::
   forall sym arch s st fs v bin.
   sym ~ W4B.ExprBuilder s st fs =>
-  MM.RegisterInfo (MM.ArchReg arch) =>
+  PA.ValidArch arch =>
   sym ->
   PS.SimScope sym arch v ->
   SingleNodeEntry arch bin ->
   PairGraph sym arch ->
   IO ((PS.SimState sym arch PS.GlobalScope bin, PFn.FnBindings sym bin v), PairGraph sym arch)
 initFnBindings sym scope sne pg = do
-  (PS.PopT st_global, binds) <- PFn.init sym (PS.PopT st)
-  let pg' = pg & (syncData dp . syncStates) %~ MapF.insert sne st_global
-  binds' <- case MapF.lookup sne (pg' ^. (syncData dp . syncBindings)) of
-    Just (PS.AbsT bindsSpec_prev) -> do
-      binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
-      -- bindings cannot clash, since they are fresh, so the mux condition doesn't matter
-      true_ <- PS.concreteScope sym (W4.ConcreteBool True)
-      PFn.merge sym true_ binds binds_prev
-    Nothing -> return binds
-  let bindsSpec = PS.AbsT $ PS.mkSimSpec scope binds'
-  return $ ((st_global, binds), pg' & (syncData dp . syncBindings) %~ MapF.insert sne bindsSpec)
+  case MapF.lookup sne (pg ^. (syncData dp . syncStates)) of
+    -- if we already have a 'syncState' entry, then we should re-use those
+    -- uninterpreted functions rather than making new ones
+    Just st_global -> case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+      Just (PS.AbsT bindsSpec_prev) -> do
+        binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
+        return ((st_global, binds_prev), pg)
+      Nothing -> fail $ "Missing binding information for node: " ++ show sne
+    Nothing -> do
+      (PS.PopT st_global, binds) <- PFn.init sym (PS.PopT st)
+      let pg' = pg & (syncData dp . syncStates) %~ MapF.insert sne st_global
+      (binds', pg'') <- addFnBindings sym scope sne binds pg'
+      return $ ((st_global, binds'), pg'')
   where
     dp = singleNodeDivergence sne
     bin = singleEntryBin sne

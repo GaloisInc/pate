@@ -720,54 +720,77 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
     Nothing -> throwHere $ PEE.IncompatibleSingletonNodes blkO blkP
   
   let dp = singleNodeDivergence sneO
-  
   let syncNode = GraphNode syncNodeEntry
-
   let snePair = PPa.PatchPair sneO sneP
+  let pre_refines = getDomainRefinements syncNode pg
 
-  pg1 <- withFreshScope blkPair $ \(scope :: PS.SimScope sym arch v) -> do
-    (bundles, pg') <- mergeBundles scope snePair pg
-    let pre_refines = getDomainRefinements syncNode pg
+  -- we start with two scopes: one representing the program state at the point of divergence: 'init_scope',
+  -- and one representing the program state at the merge point
+  
+  pg_final <- withFreshScope (graphNodeBlocks dp) $ \(splitScope :: PS.SimScope sym arch init) -> do
+    withFreshScope blkPair $ \(mergeScope :: PS.SimScope sym arch merge) -> do
+      ((sbundlePair@(PPa.PatchPair sbundleO sbundleP)), pg') <- mergeBundles splitScope mergeScope snePair pg
+      dpDomSpec <- evalPG pg $ getCurrentDomainM dp
+      -- domain at the divergence point
+      dpDom <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair splitScope) dpDomSpec
+      noop <- noopBundle splitScope (graphNodeBlocks dp)
 
-    --TODO: this isn't quite right, because the transition from single to two sided analysis immediately
-    -- results in everything getting dumped from the equivalence domain (since the "other" single-sided state
-    -- has now changed arbitrarily)
-    -- We need to give an interpretation for this state via the other side of the analysis, which means we
-    -- need to include both the original and patched pre-domains (and corresponding assumptions about the
-    -- uninterpreted functions) when widening both sides
 
-    let go :: forall bin. PairGraph sym arch -> SingleNodeEntry arch bin -> EquivM_ sym arch (PairGraph sym arch)
-        go pg0 sne = do
-          let bin = singleEntryBin sne
-          let bin_other = PBi.flipRepr bin
-          sne_other <- PPa.get bin_other snePair
-          let nd = GraphNode $ singleToNodeEntry sne
-          domSpec <- evalPG pg $ getCurrentDomainM nd
-          dom <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) domSpec
-          (SingleBundle bundle binds) <- PPa.get bin bundles
-          withTracing @"node" nd $ do
-            emitTraceLabel @"domain" PAD.Predomain (Some dom)
-            withGraphNode' scope nd bundle dom pg0 $ do
-              let
-                collectCondition :: ConditionKind -> PFn.FnBindings sym (PBi.OtherBinary bin) v -> PFn.FnBindings sym (PBi.OtherBinary bin) v
-                collectCondition condK binds_acc = do
-                  case getCondition pg0 nd condK of
-                    Just condSpec -> PS.viewSpecBody condSpec $ \cond -> PFn.addUsedFns sym cond binds_acc
-                    Nothing -> binds_acc
+      withValidInit splitScope (graphNodeBlocks dp) $ 
+        withPredomain splitScope noop dpDom $
+        withValidInit (singleBundleScope sbundleO) (singleBundleBlocks sbundleO) $
+        withValidInit (singleBundleScope sbundleP) (singleBundleBlocks sbundleP) $
+        withPredomain (singleBundleScope sbundleO) (singleBundle sbundleO) (singleBundleDomain sbundleO) $
+        withPredomain (singleBundleScope sbundleP) (singleBundle sbundleP) (singleBundleDomain sbundleP) $
+        withConditionsAssumed (singleBundleScope sbundleO) (singleBundle sbundleO) (singleBundleDomain sbundleO) (GraphNode $ singleToNodeEntry sneO) pg' $
+        withConditionsAssumed (singleBundleScope sbundleP) (singleBundle sbundleP) (singleBundleDomain sbundleP) (GraphNode $ singleToNodeEntry sneP) pg' $ do
+          
+          bindsOAsm <- IO.liftIO $ PFn.toPred sym $ singleBundleBinds sbundleO
+          bindsPAsm <- IO.liftIO $ PFn.toPred sym $ singleBundleBinds sbundleP
+          bindsAsms <- IO.liftIO $ W4.andPred sym bindsOAsm bindsPAsm
+          
+          withAssumption bindsAsms $ do
+            let
+              collectCondition :: forall bin v. PBi.WhichBinaryRepr bin -> GraphNode arch -> PairGraph sym arch -> ConditionKind -> PFn.FnBindings sym (PBi.OtherBinary bin) v -> PFn.FnBindings sym (PBi.OtherBinary bin) v
+              collectCondition _ nd pg_ condK binds_acc = do
+                case getCondition pg_ nd condK of
+                  Just condSpec -> PS.viewSpecBody condSpec $ \cond -> PFn.addUsedFns sym cond binds_acc
+                  Nothing -> binds_acc
+              
+            (new_bind_asms, pg'') <- withPG pg' $ PPa.forBinsC $ \bin -> do
+              sbundle <- PPa.get bin sbundlePair
+              sne <- PPa.get bin snePair
+              sne_other <- PPa.get (PBi.flipRepr bin) snePair
+              let nd = GraphNode $ singleToNodeEntry sne
+              let scope = singleBundleScope sbundle
+              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) nd syncNode ConditionAsserted pg_ >>= \case
+                Just pg_' -> do
+                  let binds_other = foldr (collectCondition bin nd pg_') (singleBundleBinds sbundle) [minBound .. maxBound]
+                  priority <- thisPriority
+                  (binds, pg_'') <- IO.liftIO $ addFnBindings sym mergeScope sne_other binds_other pg_'
+                  binds_asm <- IO.liftIO $ PFn.toPred sym binds
+                  return $ (binds_asm, queueAncestors (priority PriorityHandleDesync) nd pg_'')
+                Nothing -> 
+                  -- bindings already assumed above
+                  return (W4.truePred sym, pg_)
+            
+            new_bind_asm <- PPa.joinPatchPred (\x y -> IO.liftIO $ W4.andPred sym x y) $ \bin -> 
+              PPa.getC bin new_bind_asms
 
-              pg2 <- propagateCondition scope bundle nd syncNode pg0 >>= \case
-                Just pg1 -> do
-                  let binds_other = foldr collectCondition binds [minBound .. maxBound]
-                  return $ pg1 & (syncData dp . syncBindings) %~ MapF.insert sne_other (PS.AbsT $ PS.mkSimSpec scope binds_other)
-                Nothing -> return pg0
+            withAssumption new_bind_asm $
+              withPG_ pg'' $ PPa.catBins $ \bin -> do
+                liftPG $ modify $ \pg_ -> case getDomainRefinements syncNode pg_ of
+                  [] -> addDomainRefinements syncNode pre_refines pg_
+                  _ -> pg_
+                liftEqM_ $ \pg_ -> do
+                  sbundle <- PPa.get bin sbundlePair
+                  sne <- PPa.get bin snePair
+                  let nd = GraphNode $ singleToNodeEntry sne
+                  let scope = singleBundleScope sbundle
+                  withConditionsAssumed scope (singleBundle sbundle) (singleBundleDomain sbundle) nd pg_ $
+                    widenAlongEdge scope (singleBundle sbundle) nd (singleBundleDomain sbundle) pg_ syncNode
 
-              -- re-apply any refinements that we processed for the other binary
-              let pg3 = case getDomainRefinements syncNode pg2 of
-                    [] -> addDomainRefinements syncNode pre_refines pg2
-                    _ -> pg2
-              widenAlongEdge scope bundle nd dom pg3 syncNode
-    TF.foldlMF go pg' snePair
-  return (syncNodeEntry, pg1)
+  return (syncNodeEntry, pg_final)
 
 -- | Choose some work item (optionally interactively)
 withWorkItem ::
@@ -1136,28 +1159,40 @@ noopBundle scope pPair = withSym $ \sym -> do
 
 -- | Bundle that transitions from a single-sided analysis to a two-sided analysis.
 --   FIXME: do we actually need the bindings here?
-data SingleBundle sym arch v bin = SingleBundle
-  { singleBundle :: SimBundle sym arch v, singleBundleBinds :: PFn.FnBindings sym (PBi.OtherBinary bin) v }
+data SingleBundle sym arch (v_split :: PS.VarScope) (v_merge :: PS.VarScope) bin where
+   SingleBundle ::
+    { singleBundle :: SimBundle sym arch (PS.CompositeScope bin v_merge v_split)
+    , singleBundleBinds :: PFn.FnBindings sym (PBi.OtherBinary bin) v_merge 
+    , singleBundleScope :: PS.SimScope sym arch (PS.CompositeScope bin v_merge v_split)
+    , singleBundleDomain :: AbstractDomain sym arch (PS.CompositeScope bin v_merge v_split)
+    , singleBundleBlocks :: PPa.PatchPair (PB.ConcreteBlock arch)
+    } ->
+       SingleBundle sym arch v_split v_merge bin
 
--- | Similar to 'noopBundle' but produces a pair of bundles, each specialized
---   for the single-sided node to two-sided node
+
 mergeBundles ::
-  forall sym arch v.
-  PS.SimScope sym arch v ->
+  forall sym arch v_split v_merge.
+  PS.SimScope sym arch v_split ->
+  PS.SimScope sym arch v_merge ->
   PPa.PatchPair (SingleNodeEntry arch) ->
   PairGraph sym arch ->
-  EquivM sym arch (PPa.PatchPair (SingleBundle sym arch v), PairGraph sym arch)
-mergeBundles scope snePair pg = withSym $ \sym -> do
-  blks <- PPa.forBins $ \bin -> singleNodeBlock <$> PPa.get bin snePair
-  bundle <- noopBundle scope blks
-  withPG pg $ do
-    PPa.forBins $ \bin -> do
-      let bin_other = PBi.flipRepr bin
-      sne_other <- PPa.get bin_other snePair
-      (st_other,binds) <- liftEqM $ \pg_ -> liftIO $ initFnBindings sym scope sne_other pg_
-      output <- PPa.get bin_other (simOut bundle)
-      PS.PopT output' <- return $ PS.fromGlobalScope $ PS.PopT (output { PS.simOutState = st_other })
-      return $ SingleBundle (bundle { simOut = PPa.set bin_other output' (simOut bundle) }) binds
+  EquivM sym arch (PPa.PatchPair (SingleBundle sym arch v_split v_merge), PairGraph sym arch)
+mergeBundles splitScope mergeScope snePair pg = withSym $ \sym -> withPG pg $ do
+  PS.compositeScopeCases mergeScope splitScope $ \bin scope -> do
+    sne <- PPa.get bin snePair
+    let dp = singleNodeDivergence sne
+    let bin_other = PBi.flipRepr bin
+    dpBlk <- PPa.get bin_other (graphNodeBlocks dp)
+    let sneBlk = singleNodeBlock sne
+    let blks = PPa.mkPair bin sneBlk dpBlk
+    bundle <- lift $ noopBundle scope blks
+    sne_other <- PPa.get bin_other snePair
+    (st_other,binds) <- liftEqM $ \pg_ -> liftIO $ initFnBindings sym mergeScope sne_other pg_
+    output <- PPa.get bin_other (simOut bundle)
+    PS.PopT output' <- return $ PS.fromGlobalScope $ PS.PopT (output { PS.simOutState = st_other })
+    domSpec <- liftPG $ getCurrentDomainM (GraphNode $ singleToNodeEntry sne)
+    dom <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) domSpec
+    return $ SingleBundle (bundle { simOut = PPa.set bin_other output' (simOut bundle) }) binds scope dom blks
 
 -- | For a given 'PSR.MacawRegEntry' (representing the initial state of a register)
 -- and a corresponding 'MAS.AbsValue' (its initial abstract value according to Macaw),
