@@ -45,6 +45,8 @@ module Pate.SimState
   , type VarScope
   , type GlobalScope
   , SimScope
+  , CompositeScope
+  , compositeScopeCases
   , scopeVars
   , scopeVarsPair
   , Scoped(..)
@@ -220,10 +222,42 @@ simOutRegs = simRegs . simOutState
 -- ensure that the resulting value is well-scoped.
 data VarScope = 
       GlobalScope {- ^ scope for terms with no bound variables -}
+    | CompositeScopeC VarScope VarScope {- ^ scope that combines variables from two scopes: one for original variables and one for patched -}
     | ArbitraryScope DK.Type {- ^ all other scopes (this constructor is not actually used) -}
+
+-- Similar to 'CompositeScopeC' but takes a 'bin' parameter to indicate which variables should be taken from
+-- each scope.
+type family CompositeScope (bin :: PBi.WhichBinary) (v1 :: VarScope) (v2 :: VarScope) :: VarScope
+type instance CompositeScope PBi.Original v1 v2 = 
+  CompositeScopeC v1 v2
+type instance CompositeScope PBi.Patched v1 v2 = 
+  CompositeScopeC v2 v1
 
 type GlobalScope = 'GlobalScope
 
+compositeScope ::
+  forall sym arch v1 v2 a.
+  SimScope sym arch v1 -> 
+  SimScope sym arch v2 -> 
+  ( SimScope sym arch (CompositeScopeC v1 v2) ->
+    SimScope sym arch (CompositeScopeC v2 v1) ->
+    a) -> a
+compositeScope (SimScope v1O v1P) (SimScope v2O v2P) f = 
+  f (coerce (SimScope (coerce v1O) v2P)) (coerce (SimScope (coerce v2O) v1P))
+
+compositeScopeCases ::
+  forall sym arch v1 v2 m a.
+  Monad m =>
+  SimScope sym arch v1 -> 
+  SimScope sym arch v2 -> 
+  (forall bin.
+    PBi.WhichBinaryRepr bin ->
+    SimScope sym arch (CompositeScope bin v1 v2) ->
+    m (a bin)) -> m (PPa.PatchPair a)
+compositeScopeCases scope1 scope2 f = compositeScope scope1 scope2 $ \scope1' scope2' -> do
+  aO <- f PBi.OriginalRepr scope1'
+  aP <- f PBi.PatchedRepr scope2'
+  return $ PPa.PatchPair aO aP
 
 
 -- | A 'Scoped' type is parameterized by a phantom 'VarScope' type variable, used
