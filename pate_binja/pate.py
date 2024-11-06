@@ -478,9 +478,8 @@ class PateWrapper:
 
         elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_contents'):
             # Prompt User
-            # TODO: Heuristic for when to update graph. Ask Dan. Maybe add flag to JSON?
-            if rec['this'].startswith('Control flow desynchronization found at') \
-                    or rec['this'].startswith('Continue verification?'):
+            if (not rec.get('this') == 'Choose Entry Point'
+                    and isBlocked(rec)):
                 # Extract flow graph
                 cfar_graph = self.extract_graph()
                 if cfar_graph:
@@ -1275,6 +1274,18 @@ def get_domain(rec: dict, kind: str):
             return content['abstract_domain']
 
 
+def isBlocked(rec: dict):
+    if not (isinstance(rec, dict)
+            and rec.get('trace_node_blocked')):
+        return False
+
+    for c in rec.get('trace_node_contents', []):
+        if not (isinstance(c, dict) and c.get('blocked') is False):
+            return False
+
+    return True
+
+
 def pprint_domain(d: dict, pre: str = '', out: IO = sys.stdout):
     for k,v in d.items():
         match k:
@@ -1851,7 +1862,8 @@ def run_pate_demo():
     file = files[int(choice)]
 
     replay = file.endswith('.replay')
-    user = TtyUserInteraction(not replay)
+    user = TtyUserInteraction(False) # Don't prompt to show CFAR graph for now
+    #user = TtyUserInteraction(not replay)
     pate = PateWrapper(file, user)
     #pate.debug_cfar = True
     pate.run()
