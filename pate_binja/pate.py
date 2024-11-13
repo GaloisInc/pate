@@ -206,7 +206,36 @@ class PateWrapper:
 
         self.prune_orphans(cfar_graph)
 
+        self.markFocusNodes(cfar_graph)
+
         return cfar_graph
+
+    def markFocusNodes(self, cfar_graph: CFARGraph) -> None:
+        self._command('goto_prompt')
+        rec = self.next_json()
+
+        while True:
+            this = rec.get('this')
+            if this == '<Toplevel>':
+                break
+
+            # TODO: desc? Or use data?
+            nodes = (n for n in cfar_graph.nodes.values() if n.desc == this)
+            node = next(nodes, None)
+            if next(nodes, None):
+                print(f'WARNING: Multiple nodes match: {this}')
+
+            if rec.get('trace_node_kind') == 'blocktarget':
+                if node:
+                    node.focus = True
+            elif rec.get('trace_node_kind') == 'node':
+                if node:
+                    node.focus = True
+                break
+
+            self._command('up')
+            rec = self.next_json()
+        pass
 
     def connect_divergence_nodes(self, graph: CFARGraph):
         divergentNodes: set[CFARNode] = set()
@@ -372,7 +401,6 @@ class PateWrapper:
                 cfar_node.exit_meta_data = {}
             if rec['trace_node'].get('entry_body'):
                 context = rec['trace_node']['entry_body']['context']
-            cfar_node.finished = ancestor_tnc['finished']
 
         # TODO: Hack for blocks requiring implicit exit. Could possibly also look for 'endcase' == 'MacawBlockEndCall'.
         # TODO: Ask Dan about this, but the resulting graph looks reasonable to me.
@@ -736,7 +764,6 @@ class WideningInfo:
 
 class CFARNode:
     exits: list[CFARNode]
-    finished: bool
 
     def __init__(self, id: str, desc: str, data: dict):
         self.id = id
@@ -749,7 +776,7 @@ class CFARNode:
         self.postdomain = None
         self.external_postdomain = None
         self.addr = None
-        self.finished = True
+        self.focus = False
         self.unconstrainedPredicate = None
         self.predicate = None
         self.trace_true = None
@@ -848,10 +875,8 @@ class CFARGraph:
     def get(self, id):
         return self.nodes.get(id)
 
-    def getPromptNode(self):
-        for n in self.nodes.values():
-            if not n.finished:
-                return n
+    def getFocusNodes(self):
+        return [n for n in self.nodes.values() if n.focus]
 
     def getEqCondNodes(self):
         nodes = []
@@ -1234,9 +1259,6 @@ def get_choice_id(rec: dict):
     # 'more' is set when there are more elements to display in a subtree, but they haven't been sent/printed. It means
     # you need to navigate to that subtree explicitly in order to see all the elements.
     more = rec['more']  # TODO: Ask Dan about this
-    # 'finished' only relevant when checking asynchronously. If it's false it means that the node is still under
-    # construction.
-    finished = rec['finished']
     pretty = rec['pretty']
 
     msg = str(index) + ": "
@@ -1276,6 +1298,7 @@ def get_domain(rec: dict, kind: str):
 
 def isBlocked(rec: dict):
     if not (isinstance(rec, dict)
+            and rec.get('trace_node_contents')
             and rec.get('trace_node_blocked')):
         return False
 
@@ -1829,9 +1852,10 @@ class TtyUserInteraction(PateUserInteraction):
             print('\nPate CFAR Graph:\n')
             graph.pprint()
 
-        promptNode = graph.getPromptNode()
-        if promptNode:
-            print('Prompt Node:', promptNode.id)
+        focusNodes = graph.getFocusNodes()
+        print('Focus Nodes:')
+        for n in focusNodes:
+            print(f'   {n.id}')
 
 
 def load_run_config(file: os.PathLike) -> Optional[dict]:

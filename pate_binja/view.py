@@ -237,12 +237,12 @@ class GuiUserInteraction(pate.PateUserInteraction):
     def show_cfar_graph(self, graph: pate.CFARGraph) -> None:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.build_pate_flow_graph(graph))
 
-        promptNode = graph.getPromptNode()
+        focusNodes = graph.getFocusNodes()
         eqCondNodes = graph.getEqCondNodes()
-        if promptNode:
-            #print('promptNode:', promptNode)
+        if focusNodes:
+            #print('focusNodes:', focusNodes)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
-            execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars([promptNode]))
+            execute_on_main_thread_and_wait(lambda: self.pate_widget.flow_graph_widget.showCfars(focusNodes))
         elif eqCondNodes:
             #print('eqCondNodes:', eqCondNodes)
             self.pate_widget.flow_graph_widget.flowGraph.layout_and_wait()
@@ -1137,8 +1137,8 @@ class MyFlowGraphWidget(FlowGraphWidget):
             lines = out.getvalue().split('\n')
             truncLines = []
             maxLen = 0
-            for line in lines:
-                if len(truncLines) <= 1:
+            for i, line in enumerate(lines):
+                if i <= 1:
                     # First and second line
                     maxLen = max(maxLen, len(line))
                 else:
