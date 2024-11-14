@@ -88,8 +88,10 @@ class PateWrapper:
         # We use a helper script to run logic in the user's shell environment.
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-pate.sh")
         # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
+        allArgs = ['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel', '--add-trace-constraints'] + args
+        print('Pate command line: ' + ' '.join(allArgs))
         with open(os.path.join(cwd, "lastrun.replay"), "w", encoding='utf-8') as trace:
-            with Popen(['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel', '--add-trace-constraints'] + args,
+            with Popen(allArgs,
                        cwd=cwd,
                        stdin=PIPE, stdout=PIPE,
                        stderr=STDOUT,
@@ -503,6 +505,11 @@ class PateWrapper:
             self.user.show_message('\nProcessing verification results ...\n')
             self.processFinalResult()
             return False
+
+        elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_kind') == 'trace_events':
+            self.user.show_message(rec.get('this'))
+            choice = self._ask_user('', []) # TODO: Prompt here?
+            self._command(choice)
 
         elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_contents'):
             # Prompt User
