@@ -1284,6 +1284,13 @@ class MyFlowGraphWidget(FlowGraphWidget):
                                                                          sourceCfarNode.id + " to exit " + exitCfarNode.id))
                 menu.addAction(action)
 
+            if exitMetaData.get('observable_diff_trace'):
+                action = QAction(f'Show Observable Diff Trace', self)
+                action.triggered.connect(lambda _: self.showExitTraceInfo(sourceCfarNode, exitCfarNode,
+                                                                          exitMetaData['observable_diff_trace'],
+                                                                          'Observable Diff Trace'))
+                menu.addAction(action)
+
             if menu.actions():
                 menu.exec_(event.globalPos())
 

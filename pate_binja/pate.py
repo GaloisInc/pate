@@ -380,10 +380,20 @@ class PateWrapper:
         if cfar_node and cfar_parent:
             cfar_exit = cfar_node
             cfar_parent.addExit(cfar_node)
+
             if rec['trace_node_kind'] == 'blocktarget':
                 for c in  rec['trace_node_contents']:
                     if c.get('content') and c['content'].get('traces', {}):
                         cfar_parent.addExitMetaData(cfar_exit, 'event_trace', c['content'])
+
+            observableDiff = next(
+                (n for n in rec['trace_node_contents'] if n.get('pretty') == 'Observable difference found'), None)
+            if observableDiff:
+                traceContent = rec['trace_node_contents'][observableDiff['index'] + 1]
+                cfar_parent.addExitMetaData(cfar_exit, 'observable_diff_trace', traceContent['content'])
+                # don't go any deeper
+                return
+
             if self.debug_cfar:
                 print('CFAR ID (parent):', cfar_parent.id)
 
@@ -506,12 +516,7 @@ class PateWrapper:
             self.processFinalResult()
             return False
 
-        elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_kind') == 'trace_events':
-            self.user.show_message(rec.get('this'))
-            choice = self._ask_user('', []) # TODO: Prompt here?
-            self._command(choice)
-
-        elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_contents'):
+        elif isinstance(rec, dict) and rec.get('this') and rec.get('trace_node_kind'):
             # Prompt User
             if (not rec.get('this') == 'Choose Entry Point'
                     and isBlocked(rec)):
@@ -526,41 +531,6 @@ class PateWrapper:
                 rec = self.next_json()
             choice = self._ask_user_rec(rec)
             self._command(choice)
-
-        # elif (isinstance(rec, dict) and rec.get('this')
-        #         and rec.get('trace_node_contents') is not None
-        #         and rec['this'].startswith('Assumed Equivalence Conditions')):
-        #     # pprint the eq cond
-        #     eqCond = rec['trace_node_contents'][len(rec['trace_node_contents']) - 1]['content'].get('trace_node')
-        #     if eqCond:
-        #         self.user.show_message('\n\nFinal Equivalence Condition:')
-        #         self.user.show_message(eqCond.replace('\\n', '\n') + '\n')
-        #         return False
-        #
-        #     eqCond = rec['trace_node_contents'][len(rec['trace_node_contents']) - 1]['content'].get('extra_preds')
-        #     if eqCond:
-        #         self.user.show_message('\n\nFinal Equivalence Condition:')
-        #         with io.StringIO() as out:
-        #             if eqCond.get('predicates'):
-        #                 for p in eqCond['predicates']:
-        #                     out.write('  ')
-        #                     pprint_symbolic(out, p)
-        #                     out.write('\n')
-        #             elif eqCond.get('symbolic'):
-        #                 out.write('  ')
-        #                 pprint_symbolic(out, eqCond)
-        #                 out.write('\n')
-        #             else:
-        #                 out.write('  ')
-        #                 out.write(eqCond)
-        #                 out.write('\n')
-        #             self.user.show_message(out.getvalue())
-        #         return False
-        #
-        # elif isinstance(rec, dict) and rec.get('trace_node_kind') == 'equivalence_result':
-        #     # Done if we got an equivalence result
-        #     self.user.show_message(rec['this'] + '\n')
-        #     return False
 
         elif isinstance(rec, dict) and rec.get('error'):
             self.show_message('error: ' + rec['error'])
