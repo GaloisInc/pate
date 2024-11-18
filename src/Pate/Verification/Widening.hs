@@ -107,7 +107,8 @@ import qualified Pate.TraceCollection as PTc
 import           Pate.Verification.PairGraph
 import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Validity as PVV
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns, graphNodeBlocks )
+import           Pate.Verification.PairGraph.Node 
+  ( GraphNode, pattern GraphNode, pattern ReturnNode, pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns, graphNodeBlocks, asSingleNodeEntry, singleEntryBin, singleNodeDivergePoint )
 import qualified Pate.Verification.StrongestPosts.CounterExample as CE
 
 import qualified Pate.AssumptionSet as PAs

@@ -24,6 +24,8 @@ module Pate.PatchPair (
   , pattern PatchPairSingle
   , pattern PatchPairOriginal
   , pattern PatchPairPatched
+  , asBinaryPair
+  , fromBinaryPair
   , PatchPairM(..)
   , PatchPairT
   , PatchPairC
@@ -128,6 +130,16 @@ pattern PatchPairOriginal a = PatchPairSingle PB.OriginalRepr a
 
 pattern PatchPairPatched :: tp PB.Patched -> PatchPair tp
 pattern PatchPairPatched a = PatchPairSingle PB.PatchedRepr a
+
+asBinaryPair :: PatchPair tp -> PB.SomeBinary (PB.BinaryPair tp)
+asBinaryPair = \case
+  PatchPair x y -> PB.SomeBinary PB.BothBinariesRepr (PB.BinaryPair x y)
+  PatchPairSingle bin x -> PB.SomeBinary (PB.SingleBinaryRepr bin) (PB.BinarySingle bin x)
+
+fromBinaryPair :: PB.BinaryPair tp bin -> PatchPair tp
+fromBinaryPair = \case
+  PB.BinaryPair x y -> PatchPair x y
+  PB.BinarySingle bin x -> PatchPairSingle bin x
 
 lens ::
   PB.WhichBinaryRepr bin ->
@@ -543,18 +555,21 @@ forBins2 f = fmap unzipPatchPair2 $ forBins $ \bin -> do
 ppEq :: PP.Pretty x => PP.Pretty y => x -> y -> Bool
 ppEq x y = show (PP.pretty x) == show (PP.pretty y)
 
-instance TestEquality tp => Eq (PatchPair tp) where
+instance (forall bin. Eq (tp bin)) => Eq (PatchPair tp) where
   PatchPair o1 p1 == PatchPair o2 p2
-    | Just Refl <- testEquality o1 o2
-    , Just Refl <- testEquality p1 p2
+    | o1 == o2
+    , p1 == p2
     = True
-  PatchPairSingle _ a1 == PatchPairSingle _ a2 | Just Refl <- testEquality a1 a2 = True
+  PatchPairSingle bin1 a1 == PatchPairSingle bin2 a2 | Just Refl <- testEquality bin1 bin2 = a1 == a2
   _ == _ = False
 
-instance forall tp. (TestEquality tp, OrdF tp) => Ord (PatchPair tp) where
+instance (forall bin. Ord (tp bin)) => Ord (PatchPair tp) where
   compare pp1 pp2 = case (pp1,pp2) of
-    (PatchPair o1 p1, PatchPair o2 p2) -> toOrdering $ (lexCompareF o1 o2 (compareF p1 p2))
-    (PatchPairSingle _ s1, PatchPairSingle _ s2) -> toOrdering $ compareF s1 s2
+    (PatchPair o1 p1, PatchPair o2 p2) -> compare o1 o2 <> compare p1 p2
+    (PatchPairSingle bin1 s1, PatchPairSingle bin2 s2) -> case compareF bin1 bin2 of
+      EQF -> compare s1 s2
+      LTF -> LT
+      GTF -> GT
     (PatchPairSingle{},PatchPair{}) -> LT
     (PatchPair{},PatchPairSingle{}) -> GT
 
