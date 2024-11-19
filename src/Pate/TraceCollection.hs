@@ -87,7 +87,7 @@ insertReg ::
   TraceCollection sym arch ->
   TraceCollection sym arch
 insertReg reg tr trcol = trcol 
-  { trAllTraces = tr:(trAllTraces trcol)
+  { trAllTraces = (trAllTraces trcol) ++ [tr]
   , trTraceMapRegs = Map.insertWith Set.union (Some reg) (Set.singleton (length (trAllTraces trcol))) (trTraceMapRegs trcol)
   }
 
@@ -99,7 +99,7 @@ insertCell ::
   TraceCollection sym arch ->
   TraceCollection sym arch
 insertCell cell tr trcol = trcol 
-  { trAllTraces = tr:(trAllTraces trcol)
+  { trAllTraces = (trAllTraces trcol) ++ [tr]
   , trTraceMapCells = Map.insertWith Set.union (Some cell) (Set.singleton (length (trAllTraces trcol))) (trTraceMapCells trcol)
   }
 
@@ -137,7 +137,7 @@ insert ::
   TraceCollection sym arch ->
   TraceCollection sym arch
 insert regs cells tr trcol = trcol
-  { trAllTraces = tr:(trAllTraces trcol)
+  { trAllTraces = (trAllTraces trcol) ++ [tr]
   , trTraceMapRegs =
       foldr (\reg -> Map.insertWith Set.union reg (Set.singleton idx)) (trTraceMapRegs trcol) regs
   , trTraceMapCells =
