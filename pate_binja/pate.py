@@ -1389,8 +1389,15 @@ def pprint_node_event_trace_domain(trace, pre: str = '', out: IO = sys.stdout):
     precond = trace.get('precondition') if trace else None
     postcond = trace.get('postcondition') if trace else None
     # [20240509 JCC] Dan says to only show the domain for a trace if postcondition is present.
+    # [20241119 JCC] More detail from Dan: I don't think there's much value in it for concrete
+    # traces, since it can be deduced by looking at the differences between the traces. i.e.
+    # the precondition tells you which locations were assumed equal initially, which you can
+    # tell fairly easily in a concrete trace by looking at differences in the initial state.
+    # It's only potentially relevant when you have a post-condition, since it's otherwise
+    # possibly not obvious why a given trace violates the post-condition, which is why I
+    # think we included it in the first place.
     if not (postcond):
-        out.write(f'{pre}No Pre/Post Condition.\n')
+        out.write(f'{pre}No Post Condition.\n')
         return
 
     if precond:
