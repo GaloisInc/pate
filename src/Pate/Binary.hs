@@ -42,6 +42,7 @@ module Pate.Binary
   , SomeBinary(..)
   , HasWhichBinary
   , getSingle
+  , AsSingle(..)
   )
 where
 
@@ -145,9 +146,61 @@ data BinaryType = SingleBinary WhichBinary | BothBinaries
 type SingleBinary bin = 'SingleBinary bin
 type BothBinaries = 'BothBinaries
 
+data AsSingle (f :: BinaryType -> k) (wbin :: WhichBinary) where
+  AsSingle :: WhichBinaryRepr wbin -> f (SingleBinary wbin) -> AsSingle f wbin
+
+instance Eq (f (SingleBinary bin)) => Eq (AsSingle f bin) where
+  AsSingle _ x == AsSingle _ y = x == y
+
+instance (forall bin. Eq (f (SingleBinary bin))) => TestEquality (AsSingle f) where
+  testEquality (AsSingle binx x) (AsSingle biny y) = case testEquality binx biny of
+    Just Refl | x == y -> Just Refl
+    _ -> Nothing
+
+instance (forall bin. Ord (f (SingleBinary bin))) => OrdF (AsSingle f) where
+  compareF (AsSingle binx x) (AsSingle biny y) = 
+    lexCompareF binx biny $ fromOrdering $ compare x y
+
+instance Ord (f (SingleBinary bin)) => Ord (AsSingle f bin) where
+  compare (AsSingle _ x) (AsSingle _ y) = compare x y
+
 data BinaryPair (f :: WhichBinary -> Type) (bin :: BinaryType) where
   BinarySingle :: WhichBinaryRepr bin -> f bin -> BinaryPair f (SingleBinary bin)
   BinaryPair :: f Original -> f Patched -> BinaryPair f BothBinaries
+
+class HasLens x y where
+  getLens :: L.Lens' x y
+
+instance forall f bin wbin. HasWhichBinary bin wbin => HasLens (BinaryPair f bin) (f wbin) where
+  getLens = \f bpair ->
+    hasWhichBinaryCases @bin @wbin @f bpair (\bin x -> fmap (BinarySingle bin) (f x)) $ \bin x y -> case bin of
+      OriginalRepr -> fmap (\z -> BinaryPair z y) (f x)
+      PatchedRepr -> fmap (\z -> BinaryPair y z) (f x)
+
+instance HasLens (AsSingle f wbin) (f (SingleBinary wbin)) where
+  getLens f (AsSingle bin x) = fmap (\z -> AsSingle bin z) (f x)
+
+pairToRepr :: BinaryPair f bin -> BinaryTypeRepr bin
+pairToRepr (BinarySingle bin _) = SingleBinaryRepr bin
+pairToRepr (BinaryPair{}) = BothBinariesRepr
+
+reprToPair :: BinaryTypeRepr bin -> BinaryPair WhichBinaryRepr bin
+reprToPair (SingleBinaryRepr bin) = BinarySingle bin bin
+reprToPair BothBinariesRepr = BinaryPair OriginalRepr PatchedRepr
+
+hasWhichBinaryCases ::
+  forall bin wbin f a.
+  HasWhichBinary bin wbin =>
+  BinaryPair f bin ->
+  (bin ~ SingleBinary wbin => WhichBinaryRepr wbin -> f wbin -> a) ->
+  (bin ~ BothBinaries => WhichBinaryRepr wbin -> f wbin -> f (OtherBinary wbin) -> a) ->
+  a
+hasWhichBinaryCases bpair f_single f_pair = case (bpair, getWhichBinary @bin @wbin (reprToPair (pairToRepr bpair))) of
+  (BinarySingle bin1 x, bin2) | Just Refl <- testEquality bin1 bin2 -> f_single bin1 x
+  (BinaryPair x y, bin) -> case bin of
+    OriginalRepr -> f_pair OriginalRepr x y
+    PatchedRepr -> f_pair PatchedRepr y x
+  _ -> error "hasWhichBinaryCases : impossible"
 
 getSingle :: BinaryPair f (SingleBinary wbin) -> f wbin
 getSingle (BinarySingle _ x) = x
@@ -160,12 +213,12 @@ instance (forall bin. Eq (f bin)) => TestEquality (BinaryPair f) where
       x1 == y1, x2 == y2 -> Just Refl
     _ -> Nothing
 
-instance (forall wbin. HasWhichBinary bin wbin => Eq (f wbin)) => Eq (BinaryPair f bin) where
+instance (forall wbin. Eq (f wbin)) => Eq (BinaryPair f bin) where
   x == y = case (x,y) of
     (BinarySingle _ x', BinarySingle _ y') -> x' == y'
     (BinaryPair x1 x2, BinaryPair y1 y2) -> x1 == y1 && x2 == y2
 
-instance (forall wbin. HasWhichBinary bin wbin => Ord (f wbin)) => Ord (BinaryPair f bin) where
+instance (forall wbin. Ord (f wbin)) => Ord (BinaryPair f bin) where
   compare x y = case (x,y) of
     (BinarySingle _ x', BinarySingle _ y') -> compare x' y'
     (BinaryPair x1 x2, BinaryPair y1 y2) -> compare x1 y1 <> compare x2 y2
@@ -184,23 +237,23 @@ binType = \case
   BinaryPair _ _ -> BothBinariesRepr
 
 class HasWhichBinary (bin :: BinaryType) (wbin :: WhichBinary) where
-  binLens' :: L.Lens' (BinaryPair g bin) (g wbin)
+  getWhichBinary :: BinaryPair f bin -> f wbin
 
 instance HasWhichBinary (SingleBinary wbin) wbin where
-  binLens' f (BinarySingle bin x) = fmap (BinarySingle bin) (f x)
+  getWhichBinary (BinarySingle _ x) = x
 
 instance HasWhichBinary BothBinaries Original where
-  binLens' f (BinaryPair x y) = fmap (\z -> BinaryPair z y) (f x)
+  getWhichBinary (BinaryPair x _y) = x
 
 instance HasWhichBinary BothBinaries Patched where
-  binLens' f (BinaryPair x y) = fmap (\z -> BinaryPair x z) (f y)
+  getWhichBinary (BinaryPair _x y) = y
 
 lens :: 
   forall wbin bin f.
   HasWhichBinary bin wbin =>
   WhichBinaryRepr wbin -> 
-  L.Lens' (BinaryPair f bin) (f wbin)
-lens _ = binLens' @bin @wbin @f
+  L.Lens' (BinaryPair f bin)  (f wbin)
+lens _ = getLens @(BinaryPair f bin) @(f wbin)
 
 withWhichBinary ::
   Applicative m =>
@@ -233,35 +286,6 @@ instance (forall bin. Ord (f bin)) => Ord (SomeBinary f) where
     LTF -> LT
     GTF -> GT
 
-{-
-instance HasWhichBinary BothBinaries Patched where
-  getBin (BinaryPair _ x) = x
-
-
-class AsBinaryType (bin1 :: BinaryType) (bin2 :: BinaryType) where
-  asBin :: BinaryPair f bin1 -> BinaryPair f bin2
-
-instance AsBinaryType bin bin where
-  asBin = id
-
-instance AsBinaryType BothBinaries (SingleBinary Original) where
-  asBin (BinaryPair x _) = BinarySingle OriginalRepr x
-
-instance AsBinaryType BothBinaries (SingleBinary Patched) where
-  asBin (BinaryPair _ y) = BinarySingle PatchedRepr y
-
--- L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch v])
-
-binLens :: HasWhichBinary bin wbin => L.Lens' (BinaryPair g bin) (g wbin)
-binLens f bpair = fmap (\x -> case bpair of error "")  (f (getBin bpair))
-
-traverseWithBinary ::
-  Monad m =>
-  BinaryPair f bin ->
-  (forall wbin. (forall g. HasWhichBinary bin wbin => L.Lens' (BinaryPair g bin) (g wbin)) -> m (h wbin)) ->
-  m (BinaryPair h bin)
-traverseWithBinary bpair f = error ""
--}
 
 instance TFC.FunctorFC BinaryPair where
   fmapFC f = \case

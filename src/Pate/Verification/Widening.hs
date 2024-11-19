@@ -39,7 +39,7 @@ module Pate.Verification.Widening
   ) where
 
 import           GHC.Stack
-import           Control.Lens ( (.~), (&), (^.) )
+import           Control.Lens ( (.~), (&), (^.), (%~) )
 import           Control.Monad (when, forM_, unless, filterM, foldM, void)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
