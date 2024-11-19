@@ -1463,7 +1463,7 @@ def pprint_memory_ops(memory_op: dict, pre: str = '', out: IO = sys.stdout, prun
     if memory_op.get('mem_op'):
         pprint_mem_op(memory_op['mem_op'], pre, out, prune_zero)
     elif memory_op.get('external_call'):
-        out.write(f'{pre}{memory_op["external_call"]}({",".join(map(pretty_call_arg, memory_op["args"]))})\n')
+        out.write(f'{pre}Event {memory_op["external_call"]}({",".join(map(pretty_call_arg, memory_op["args"]))})\n')
     else:
         out.write(f'{pre}Unknown mem op: {memory_op}')
 
@@ -1485,7 +1485,7 @@ def pprint_mem_op(mem_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero:
 
 
 def pretty_call_arg(arg):
-    if isinstance(arg, dict) and arg.get('data_expr'):
+    if isinstance(arg, dict) and 'data_expr' in arg:
         return str(arg['data_expr'])
     else:
         return str(arg)
