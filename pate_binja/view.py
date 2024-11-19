@@ -1085,7 +1085,6 @@ class PateWideningInfoDialog(QDialog):
         trace = traces[traceIdx]
 
         self.traceWidget.setTrace(trace)
-        print("updated trace")
 
     def eqValComboBoxTextChanged(self, text):
         self.updateEqValSelection()
