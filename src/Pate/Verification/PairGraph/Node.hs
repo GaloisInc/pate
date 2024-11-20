@@ -18,6 +18,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Pate.Verification.PairGraph.Node (
    
@@ -72,6 +73,10 @@ module Pate.Verification.PairGraph.Node (
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
 import qualified Data.Aeson as JSON
 import qualified Compat.Aeson as HMS
+import qualified Control.Lens as L
+import           Control.Lens ( (^.), (&), (.~))
+import           Data.Functor.Const
+
 import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA
@@ -122,16 +127,67 @@ pattern ReturnNode ne <-
 data CallingContext arch = CallingContext { _ctxAncestors :: [PB.BlockPair arch], divergePoint :: Maybe (GraphNode arch) }
   deriving (Eq, Ord)
 
+type instance PB.FieldType "callContext" arch = PPa.WithBin (CallingContext arch)
+
 data NodeContentGen arch e bin = 
   NodeContentGen { nodeContentCtxGen :: CallingContext arch, nodeContentGen :: PBi.BinaryPair e bin }
 
 deriving instance (forall wbin. Eq (e wbin)) => Eq (NodeContentGen arch e bin)
 deriving instance (forall wbin. Ord (e wbin)) => Ord (NodeContentGen arch e bin)
 
+instance (PBi.HasWhichBinary bin wbin, PB.HasField s (e wbin) wbin) => PB.HasField s (PBi.BinaryPair e bin) wbin where
+  field = PBi.getLens @(PBi.BinaryPair e bin) @(e wbin) . PB.field @s
+
+{-
+instance (PBi.HasWhichBinary bin wbin, PB.HasField s (e wbin) arch wbin) => PB.HasField s (NodeContentGen arch e bin) arch wbin where
+  field = 
+    L.lens (\x -> (nodeContentGen x) ^. PB.field @s)
+    (\nc cb -> nc { nodeContentGen = (nodeContentGen nc) L.& PB.field @s L..~ cb })
+-}
+type instance PB.ArchOf (NodeContentGen arch e) = arch
+
+instance PBi.HasWhichBinary bin wbin => PB.HasField "block" (NodeContentGen arch (PB.ConcreteBlock arch) bin) wbin where
+  field = 
+    L.lens (\x -> (nodeContentGen x) ^. PB.field @"block") 
+    (\nc cb -> nc { nodeContentGen = (nodeContentGen nc) L.& PB.field @"block" L..~ cb })
+
+instance PBi.HasWhichBinary bin wbin => PB.HasField "funEntry" (NodeContentGen arch (PB.ConcreteBlock arch) bin) wbin where
+  field = PB.field @"block" @_ @wbin . PB.field @"funEntry"
+
 type NodeEntryGen arch = NodeContentGen arch (PB.ConcreteBlock arch)
 type NodeReturnGen arch = NodeContentGen arch (PB.FunctionEntry arch)
 
+instance PBi.HasWhichBinary bin wbin => PB.HasField "funEntry" (NodeContentGen arch (PB.FunctionEntry arch) bin) wbin where
+  field = 
+    L.lens (\x -> (nodeContentGen x) ^. PB.field @"funEntry") 
+    (\nc cb -> nc { nodeContentGen = (nodeContentGen nc) L.& PB.field @"funEntry" L..~ cb })
+
 type NodeContent arch e = PBi.SomeBinary (NodeContentGen arch e)
+
+type instance PB.ArchOf (PBi.SomeBinary f) = PB.ArchOf f
+
+instance (forall wbin bin. PBi.HasWhichBinary bin wbin => PB.HasField s (f bin) wbin) => PB.HasFieldPair s (PBi.SomeBinary f) where
+  fieldPair = 
+    L.lens (\(PBi.SomeBinary bin x) -> 
+      case bin of 
+        PBi.SingleBinaryRepr PBi.OriginalRepr -> PPa.PatchPairOriginal (x ^. PB.field @s)
+        PBi.SingleBinaryRepr PBi.PatchedRepr -> PPa.PatchPairPatched (x ^. PB.field @s)
+        PBi.BothBinariesRepr -> PPa.PatchPair (x ^. PB.field @s) (x ^. PB.field @s)
+      ) 
+      (\(PBi.SomeBinary bin x) ppair -> case (bin, ppair) of
+        (PBi.SingleBinaryRepr PBi.OriginalRepr, PPa.PatchPairOriginal y) -> PBi.SomeBinary bin (x & PB.field @s .~ y)
+        (PBi.SingleBinaryRepr PBi.PatchedRepr, PPa.PatchPairPatched y) -> PBi.SomeBinary bin (x & PB.field @s .~ y)
+        (PBi.BothBinariesRepr, PPa.PatchPairOriginal y) -> PBi.SomeBinary bin (x & PB.field @s .~ y)
+        (PBi.BothBinariesRepr, PPa.PatchPairPatched y) -> PBi.SomeBinary bin (x & PB.field @s .~ y)
+        (PBi.SingleBinaryRepr PBi.OriginalRepr, PPa.PatchPair a _b) -> PBi.SomeBinary bin (x & PB.field @s .~ a)
+        (PBi.SingleBinaryRepr PBi.PatchedRepr, PPa.PatchPair _a b) -> PBi.SomeBinary bin (x & PB.field @s .~ b)
+        (PBi.BothBinariesRepr, PPa.PatchPair a b) -> PBi.SomeBinary bin ((x & PB.field @s .~ a) & PB.field @s .~ b)
+
+        -- for mismatched cases we can only ignore the input
+        -- we could consider an alternative constructor for 'SomeBinary' that captures the error case
+        (PBi.SingleBinaryRepr PBi.OriginalRepr, PPa.PatchPairPatched _y) -> PBi.SomeBinary bin x
+        (PBi.SingleBinaryRepr PBi.PatchedRepr, PPa.PatchPairOriginal _y) -> PBi.SomeBinary bin x
+      )
 
 nodeContentCtx :: NodeContent arch e -> CallingContext arch
 nodeContentCtx (NodeContent ctx _) = ctx

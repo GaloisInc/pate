@@ -22,6 +22,7 @@
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Pate.Binary
   ( type WhichBinary
@@ -43,6 +44,9 @@ module Pate.Binary
   , HasWhichBinary
   , getSingle
   , AsSingle(..)
+  , binaryPairM
+  , pattern AsBinary
+  , HasLens(..)
   )
 where
 
@@ -64,6 +68,7 @@ data WhichBinary = Original | Patched deriving (Bounded, Enum, Eq, Ord, Read, Sh
 
 type Original = 'Original
 type Patched = 'Patched
+
 
 -- | A run-time representative of which type of binary (original or patched) this is
 data WhichBinaryRepr (bin :: WhichBinary) where
@@ -146,6 +151,42 @@ data BinaryType = SingleBinary WhichBinary | BothBinaries
 type SingleBinary bin = 'SingleBinary bin
 type BothBinaries = 'BothBinaries
 
+-- | Pattern-match on an existentially quantified 'BinaryType' to determine if it
+--   contains content for a given binary
+pattern AsBinary :: forall wbin f. (KnownBinary wbin) => forall bin. (HasWhichBinary bin wbin) => f bin -> SomeBinary f
+pattern AsBinary f <- ((\(SomeBinary bin f) -> proveHasWhichBinary (knownRepr @_ @WhichBinaryRepr @wbin) bin f f) -> Just (HasWhichBinaryProof _ f))
+  where
+    AsBinary (f :: f bin) = case hasWhichBinaryProof @bin @wbin of
+      HasWhichBinarySingle wbin -> SomeBinary (SingleBinaryRepr wbin) f
+      HasWhichBinaryBoth _wbin -> SomeBinary BothBinariesRepr f
+
+data HasWhichBinaryProof f wbin where
+  HasWhichBinaryProof :: forall bin wbin f. HasWhichBinary bin wbin => WhichBinaryRepr wbin -> f bin -> HasWhichBinaryProof f wbin
+
+proveHasWhichBinary ::
+  WhichBinaryRepr wbin ->
+  BinaryTypeRepr bin ->
+  (bin ~ SingleBinary wbin => f bin) ->
+  (bin ~ BothBinaries => f bin) ->
+  Maybe (HasWhichBinaryProof f wbin)
+proveHasWhichBinary wbin bin f_single f_pair = case (wbin,bin) of
+  (OriginalRepr, SingleBinaryRepr OriginalRepr) -> Just (HasWhichBinaryProof OriginalRepr f_single)
+  (PatchedRepr, SingleBinaryRepr PatchedRepr) -> Just (HasWhichBinaryProof PatchedRepr f_single)
+  (OriginalRepr, BothBinariesRepr) -> Just (HasWhichBinaryProof OriginalRepr f_pair)
+  (PatchedRepr, BothBinariesRepr) -> Just (HasWhichBinaryProof PatchedRepr f_pair)
+  _ -> Nothing
+
+
+binaryPairM :: 
+  Applicative m =>
+  BinaryTypeRepr bin ->
+  (forall wbin. (KnownBinary wbin, HasWhichBinary bin wbin) => WhichBinaryRepr wbin -> m (f wbin)) -> 
+  m (BinaryPair f bin)
+binaryPairM bin f = case bin of
+  SingleBinaryRepr wbin -> BinarySingle wbin <$> (withRepr wbin $ f wbin)
+  BothBinariesRepr -> BinaryPair <$> f OriginalRepr <*> f PatchedRepr 
+
+
 data AsSingle (f :: BinaryType -> k) (wbin :: WhichBinary) where
   AsSingle :: WhichBinaryRepr wbin -> f (SingleBinary wbin) -> AsSingle f wbin
 
@@ -195,12 +236,11 @@ hasWhichBinaryCases ::
   (bin ~ SingleBinary wbin => WhichBinaryRepr wbin -> f wbin -> a) ->
   (bin ~ BothBinaries => WhichBinaryRepr wbin -> f wbin -> f (OtherBinary wbin) -> a) ->
   a
-hasWhichBinaryCases bpair f_single f_pair = case (bpair, getWhichBinary @bin @wbin (reprToPair (pairToRepr bpair))) of
-  (BinarySingle bin1 x, bin2) | Just Refl <- testEquality bin1 bin2 -> f_single bin1 x
-  (BinaryPair x y, bin) -> case bin of
-    OriginalRepr -> f_pair OriginalRepr x y
-    PatchedRepr -> f_pair PatchedRepr y x
-  _ -> error "hasWhichBinaryCases : impossible"
+hasWhichBinaryCases bpair f_single f_pair = case (hasWhichBinaryProof @bin @wbin, bpair) of
+  (HasWhichBinarySingle _, BinarySingle wbin x) -> f_single wbin x
+  (HasWhichBinaryBoth wbin, BinaryPair x y) -> case wbin of
+    OriginalRepr -> f_pair wbin x y
+    PatchedRepr -> f_pair wbin y x
 
 getSingle :: BinaryPair f (SingleBinary wbin) -> f wbin
 getSingle (BinarySingle _ x) = x
@@ -236,17 +276,37 @@ binType = \case
   BinarySingle bin _ -> SingleBinaryRepr bin
   BinaryPair _ _ -> BothBinariesRepr
 
-class HasWhichBinary (bin :: BinaryType) (wbin :: WhichBinary) where
-  getWhichBinary :: BinaryPair f bin -> f wbin
 
-instance HasWhichBinary (SingleBinary wbin) wbin where
-  getWhichBinary (BinarySingle _ x) = x
 
-instance HasWhichBinary BothBinaries Original where
-  getWhichBinary (BinaryPair x _y) = x
+getWhichBinary :: forall bin wbin f. HasWhichBinary bin wbin => BinaryPair f bin -> f wbin
+getWhichBinary bpair = case (hasWhichBinaryProof @bin @wbin, bpair) of
+  (HasWhichBinarySingle _, BinarySingle _ x) -> x
+  (HasWhichBinaryBoth wbin, BinaryPair x y) -> case wbin of
+    OriginalRepr -> x
+    PatchedRepr -> y
 
-instance HasWhichBinary BothBinaries Patched where
-  getWhichBinary (BinaryPair _x y) = y
+data HasWhichBinaryCases (bin :: BinaryType) (wbin :: WhichBinary) where
+  HasWhichBinarySingle :: WhichBinaryRepr wbin -> HasWhichBinaryCases (SingleBinary wbin) wbin
+  HasWhichBinaryBoth :: WhichBinaryRepr wbin -> HasWhichBinaryCases BothBinaries wbin
+
+instance KnownBinary wbin => KnownRepr (HasWhichBinaryCases (SingleBinary wbin)) wbin where
+  knownRepr = HasWhichBinarySingle knownRepr
+
+instance KnownRepr (HasWhichBinaryCases BothBinaries) Original where
+  knownRepr = HasWhichBinaryBoth OriginalRepr
+
+instance KnownRepr (HasWhichBinaryCases BothBinaries) Patched where
+  knownRepr = HasWhichBinaryBoth PatchedRepr
+
+type HasWhichBinary bin = KnownRepr (HasWhichBinaryCases bin)
+
+hasWhichBinaryProof :: forall bin wbin. HasWhichBinary bin wbin => HasWhichBinaryCases bin wbin
+hasWhichBinaryProof = knownRepr
+
+instance IsRepr (HasWhichBinaryCases bin)
+
+withHashWhichBinary :: HasWhichBinaryCases bin wbin -> (HasWhichBinary bin wbin => a) -> a
+withHashWhichBinary = withRepr
 
 lens :: 
   forall wbin bin f.
@@ -261,7 +321,8 @@ withWhichBinary ::
   (forall wbin. HasWhichBinary bin wbin => WhichBinaryRepr wbin -> m (h wbin)) ->
   m (BinaryPair h bin)
 withWhichBinary brepr f = case brepr of
-  SingleBinaryRepr bin -> BinarySingle <$> pure bin <*> f bin
+  SingleBinaryRepr OriginalRepr -> BinarySingle <$> pure OriginalRepr <*> f OriginalRepr
+  SingleBinaryRepr PatchedRepr -> BinarySingle <$> pure PatchedRepr <*> f PatchedRepr
   BothBinariesRepr -> BinaryPair <$> f OriginalRepr <*> f PatchedRepr
 
 _test ::

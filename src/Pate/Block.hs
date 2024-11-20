@@ -13,11 +13,21 @@
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE PolyKinds #-}
 
 module Pate.Block (
   -- * Block data
     BlockEntryKind(..)
   , ConcreteBlock(..)
+  , HasField(..)
+  , HasFieldPair(..)
+  , FieldType
+  -- , HasConcreteBlock(..)
   , FunCallKind(..)
   , BlockTarget(..)
   , targetBinRepr
@@ -50,11 +60,15 @@ module Pate.Block (
   , fnSymBytes
   , fnSymBase
   , fnSymPlain
+  , ArchOf
   ) where
 
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.Text as Text
 import qualified Data.Text.Encoding as Text
+import qualified Control.Lens as L
+import           Control.Lens ( (^.), (&), (.~))
+
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
 import qualified Data.Parameterized.Classes as PC
@@ -73,6 +87,8 @@ import qualified Pate.Binary as PB
 import           Pate.TraceTree
 import qualified Data.Aeson as JSON
 import Data.List.NonEmpty (NonEmpty(..))
+import Data.Parameterized.SymbolRepr
+import Data.Constraint
 
 -- | The way this block is entered dictates the initial equivalence relation we can assume
 data BlockEntryKind arch =
@@ -103,6 +119,87 @@ instance JSON.ToJSON (ConcreteBlock arch bin) where
       "address" JSON..= concreteAddress cb
     , "function" JSON..= blockFunctionEntry cb
     ]
+
+type AllBinaries (c :: PB.WhichBinary -> Constraint) = (c PB.Original, c PB.Patched)
+
+type family FieldType (s :: Symbol) (arch :: *) :: PB.WhichBinary -> *
+
+type instance FieldType "block" arch = ConcreteBlock arch
+type instance FieldType "funEntry" arch = FunctionEntry arch
+
+type family ArchOf (tp :: k) :: *
+
+type instance ArchOf (ConcreteBlock arch) = arch
+type instance ArchOf (FunctionEntry arch) = arch
+type instance ArchOf (f (bin :: PB.WhichBinary)) = ArchOf f
+type instance ArchOf (f (bin :: PB.BinaryType)) = ArchOf f
+
+class HasField (s :: Symbol) f (bin :: PB.WhichBinary) where
+  field :: L.Lens' f (FieldType s (ArchOf f) bin)
+
+instance HasField "block" (ConcreteBlock arch bin) bin where
+  field = L.lens id (\_ -> id)
+
+instance HasField "funEntry" (FunctionEntry arch bin) bin where
+  field = L.lens id (\_ -> id)
+
+field' :: forall s bin f. HasField s f  bin => L.Lens' f (FieldType s (ArchOf f) bin)
+field' = field @s @f @bin
+
+class HasFieldPair (s :: Symbol) f where
+  fieldPair :: L.Lens' f (PPa.PatchPair (FieldType s (ArchOf f)))
+  default fieldPair :: (HasField s f PB.Original, HasField s f PB.Patched) => L.Lens' f (PPa.PatchPair (FieldType s (ArchOf f)))
+  fieldPair = liftLensPair (field @s) (field @s)
+
+{-
+class HasFieldBinPair (s :: Symbol) f arch bin where
+  fieldBinPair :: L.Lens' f (PB.BinaryPair (FieldType s arch) bin)
+  default fieldBinPair :: (HasField s f arch PB.Original, HasField s f arch PB.Patched) => L.Lens' f (PB.BinaryPair (FieldType s arch) bin)
+  fieldBinPair = liftLensPair (field @s) (field @s)
+-}
+
+type instance ArchOf (PPa.PatchPair f) = ArchOf f
+type instance ArchOf (PB.BinaryPair f) = ArchOf f
+
+instance (forall bin. HasField s (f bin) bin) => HasFieldPair s (PPa.PatchPair f) where
+  fieldPair = liftLensPair2 (field @s) (field @s)
+
+liftLensPair :: L.Lens' f (g PB.Original) -> L.Lens' f (g PB.Patched) -> L.Lens' f (PPa.PatchPair g)
+liftLensPair lO lP f x = 
+  fmap (\z -> 
+    case z of 
+      PPa.PatchPair a b -> (x & lO .~ a) & lP .~ b
+      PPa.PatchPairOriginal a -> x & lO .~ a
+      PPa.PatchPairPatched b -> x & lP .~ b)
+  (f (PPa.PatchPair (x ^. lO) (x ^. lP)))
+
+liftLensPair2 :: L.Lens' (f PB.Original) (g PB.Original) -> L.Lens' (f PB.Patched) (g PB.Patched) -> L.Lens' (PPa.PatchPair f) (PPa.PatchPair g)
+liftLensPair2 lO lP f = \case
+  PPa.PatchPair a b -> fmap (\z -> case z of
+    PPa.PatchPair c d -> PPa.PatchPair (a & lO .~ c) (b & lP .~ d)
+    PPa.PatchPairOriginal c -> PPa.PatchPair (a & lO .~ c) b
+    PPa.PatchPairPatched d -> PPa.PatchPair a (b & lP .~ d)
+    ) (f (PPa.PatchPair (a ^. lO) (b ^. lP)))
+  PPa.PatchPairOriginal a -> fmap (\z -> case z of
+    PPa.PatchPair c _d -> PPa.PatchPairOriginal (a & lO .~ c)
+    PPa.PatchPairOriginal c -> PPa.PatchPairOriginal (a & lO .~ c)
+    -- assigning with a mismatched pair has no effect
+    PPa.PatchPairPatched _ -> PPa.PatchPairOriginal a
+    ) (f (PPa.PatchPairOriginal (a ^. lO)))
+  PPa.PatchPairPatched b -> fmap (\z -> case z of
+    PPa.PatchPair _c d -> PPa.PatchPairPatched (b & lP .~ d)
+    PPa.PatchPairPatched d -> PPa.PatchPairPatched (b & lP .~ d)
+    PPa.PatchPairOriginal _ -> PPa.PatchPairPatched b
+    ) (f (PPa.PatchPairPatched (b ^. lP)))
+
+{-
+  fmap (\z -> 
+    case z of 
+      PPa.PatchPair a b -> (x & lO .~ a) & lP .~ b
+      PPa.PatchPairOriginal a -> x & lO .~ a
+      PPa.PatchPairPatched b -> x & lP .~ b)
+  (f (PPa.PatchPair (x ^. lO) (x ^. lP))) 
+-}
 
 
 equivBlocks :: ConcreteBlock arch PB.Original -> ConcreteBlock arch PB.Patched -> Bool
@@ -337,6 +434,9 @@ data FunctionEntry arch (bin :: PB.WhichBinary) =
                 , functionEnd :: Maybe (MM.ArchSegmentOff arch)
                 -- ^ we might know the bounds of this function
                 }
+
+instance HasField "funEntry" (ConcreteBlock arch bin) bin where
+  field = L.lens blockFunctionEntry (\cb fe -> cb { blockFunctionEntry = fe })
 
 ppFnEntry :: (FunctionSymbol -> PP.Doc a) -> FunctionEntry arch bin -> PP.Doc a
 ppFnEntry ppsym fe = case functionSymbol fe of
