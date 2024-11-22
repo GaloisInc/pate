@@ -371,28 +371,34 @@ class PateWrapper:
             existing_cfar_node = cfar_graph.get(id)
             cfar_node = cfar_graph.add_node(id, this, rec)
 
+            # Look for observable difference trace for this node
+            for n in rec['trace_node_contents']:
+                if n.get('pretty') == 'Observable difference found':
+                    traceContent = rec['trace_node_contents'][n['index'] + 1]
+                    cfar_node.observableDiffTrace = traceContent['content']
+                    break
+
         elif rec['trace_node_kind'] == 'blocktarget':
             id = get_blocktarget_id(rec, context, cfar_parent)
             existing_cfar_node = cfar_graph.get(id)
             cfar_node = cfar_graph.add_node(id, this, rec)
 
-        # If we created a CFAR node and have a parent, link them up.
-        if cfar_node and cfar_parent:
+            # connect block target (ie exit) to parent
             cfar_exit = cfar_node
             cfar_parent.addExit(cfar_node)
 
-            if rec['trace_node_kind'] == 'blocktarget':
-                for c in  rec['trace_node_contents']:
-                    if c.get('content') and c['content'].get('traces', {}):
-                        cfar_parent.addExitMetaData(cfar_exit, 'event_trace', c['content'])
+            # Look for event trace on this exit
+            for c in  rec['trace_node_contents']:
+                if c.get('content') and c['content'].get('traces', {}):
+                    cfar_parent.addExitMetaData(cfar_exit, 'event_trace', c['content'])
+                    break
 
-            observableDiff = next(
-                (n for n in rec['trace_node_contents'] if n.get('pretty') == 'Observable difference found'), None)
-            if observableDiff:
-                traceContent = rec['trace_node_contents'][observableDiff['index'] + 1]
-                cfar_parent.addExitMetaData(cfar_exit, 'observable_diff_trace', traceContent['content'])
-                # don't go any deeper
-                return
+            # Look for observable difference trace for this node
+            for n in rec['trace_node_contents']:
+                if n.get('pretty') == 'Observable difference found':
+                    traceContent = rec['trace_node_contents'][n['index'] + 1]
+                    cfar_parent.observableDiffTrace = traceContent['content']
+                    break
 
             if self.debug_cfar:
                 print('CFAR ID (parent):', cfar_parent.id)
@@ -762,6 +768,7 @@ class CFARNode:
         self.traceConstraints = None
         self.instruction_trees = None
         self.wideningInfo = None
+        self.observableDiffTrace = None
 
         # After default initializations above, update the node
         self.update_node(desc, data)

@@ -1245,6 +1245,11 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 action.triggered.connect(lambda _: self.showWideningInfoDialog(cfarNode))
                 menu.addAction(action)
 
+            if cfarNode.observableDiffTrace:
+                action = QAction(f'Show Observable Diff Trace', self)
+                action.triggered.connect(lambda _: self.showObservableDiffTrace(cfarNode, 'Observable Diff Trace'))
+                menu.addAction(action)
+
             if menu.actions():
                 menu.exec_(event.globalPos())
 
@@ -1254,6 +1259,12 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
     def showWideningInfoDialog(self, cfarNode: pate.CFARNode):
         d = PateWideningInfoDialog(cfarNode, parent=self)
+        d.show()
+
+    def showObservableDiffTrace(self, cfarNode: pate.CFARNode, label: str = None):
+        d = PateCfarExitDialog(self)
+        d.setWindowTitle(f'Observable Diff Trace - {cfarNode.id}')
+        d.setTrace(cfarNode.observableDiffTrace, label)
         d.show()
 
     def edgePopupMenu(self, event: QMouseEvent, edgeTuple: tuple[FlowGraphEdge, bool]):
@@ -1281,13 +1292,6 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 action = QAction(f'Show Exit Instruction Trees', self)
                 action.triggered.connect(lambda _: self.showInstTreeInfo(exitMetaData['instruction_trees_to_exit'],
                                                                          sourceCfarNode.id + " to exit " + exitCfarNode.id))
-                menu.addAction(action)
-
-            if exitMetaData.get('observable_diff_trace'):
-                action = QAction(f'Show Observable Diff Trace', self)
-                action.triggered.connect(lambda _: self.showExitTraceInfo(sourceCfarNode, exitCfarNode,
-                                                                          exitMetaData['observable_diff_trace'],
-                                                                          'Observable Diff Trace'))
                 menu.addAction(action)
 
             if menu.actions():
