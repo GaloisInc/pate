@@ -1275,6 +1275,11 @@ updateAbsBlockState node d = do
     _ -> return ()
 -}
 
+instance IsTraceNode '(sym,arch) "condition_kind" where
+  type TraceNodeType '(sym,arch) "condition_kind" = ConditionKind
+  prettyNode () condk = PP.pretty $ conditionPrefix condk
+  nodeTags = mkTags @'(sym, arch) @"condition_kind" [Simplified, Summary]
+
 withSatConditionAssumed ::
   PS.SimScope sym arch v ->
   PS.SimBundle sym arch v ->
@@ -1291,8 +1296,7 @@ withSatConditionAssumed scope bundle dom nd condK gr0 f = withSym $ \sym -> do
   case W4.asConstantPred eqCond_pred of
     Just True -> f
     _ -> do
-      let msg = conditionPrefix condK
-      (mtraceT, mtraceF) <- withTracing @"message" msg $ getTracesForPred scope bundle dom eqCond_pred
+      (mtraceT, mtraceF) <- withTracing @"condition_kind" condK $ getTracesForPred scope bundle dom eqCond_pred
       case (mtraceT, mtraceF) of
         -- condition is not necessarily true or false
         (Just{}, Just{}) -> do
@@ -1319,21 +1323,21 @@ getTracesForPred ::
   EquivM sym arch (Maybe (CE.TraceEvents sym arch), Maybe (CE.TraceEvents sym arch))
 getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
-  withTracing @"expr" (Some p) $ do
-    withTracing @"message" "Simplified Condition" $ withForkedSolver_ $ do
-      p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
-      emitTrace @"expr" (Some p_pretty)
-    mtraceT <- withTracing @"message" "With condition assumed" $ 
-      withSatAssumption (PAS.fromPred p) $ do
-        traceT <- getSomeGroundTrace scope bundle dom Nothing
-        emitTrace @"trace_events" traceT
-        return traceT
-    mtraceF <- withTracing @"message" "With negation assumed" $ 
-      withSatAssumption (PAS.fromPred not_p) $ do
-        traceF <- getSomeGroundTrace scope bundle dom Nothing
-        emitTrace @"trace_events" traceF
-        return traceF
-    return (mtraceT, mtraceF)
+  emitTraceLabel @"expr" "Predicate" (Some p)
+  withTracing @"message" "Simplified Predicate" $ withForkedSolver_ $ do
+    p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
+    emitTrace @"expr" (Some p_pretty)
+  mtraceT <- withTracing @"message" "With condition assumed" $
+    withSatAssumption (PAS.fromPred p) $ do
+      traceT <- getSomeGroundTrace scope bundle dom Nothing
+      emitTrace @"trace_events" traceT
+      return traceT
+  mtraceF <- withTracing @"message" "With negation assumed" $
+    withSatAssumption (PAS.fromPred not_p) $ do
+      traceF <- getSomeGroundTrace scope bundle dom Nothing
+      emitTrace @"trace_events" traceF
+      return traceF
+  return (mtraceT, mtraceF)
   
 withConditionsAssumed ::
   PS.SimScope sym arch v ->
