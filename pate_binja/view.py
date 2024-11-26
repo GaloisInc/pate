@@ -969,9 +969,11 @@ class PateWideningInfoDialog(QDialog):
         # trace selector - pulldown? number?
         self.traceSpinBox = QSpinBox()
         self.traceSpinBox.setRange(1,1)
+        self.traceSpinBox.setVisible(False)
         self.traceSpinBox.valueChanged.connect(self.traceSpinBoxValueChanged)
+        self.traceLabel = QLabel('Trace:')
         traceSelect = QHBoxLayout()
-        traceSelect.addWidget(QLabel('Select Trace:'))
+        traceSelect.addWidget(self.traceLabel)
         traceSelect.addWidget(self.traceSpinBox)
         traceSelect.addStretch()
 
@@ -1070,7 +1072,12 @@ class PateWideningInfoDialog(QDialog):
 
         traces = item.data(Qt.UserRole)
 
+        self.traceSpinBox.setValue(0)
         self.traceSpinBox.setMaximum(len(traces))
+        self.traceSpinBox.setVisible(len(traces) > 1)
+
+        label = f'Trace ending with {item.text()} unequal:'
+        self.traceLabel.setText(label)
 
         self.updateTrace()
 
