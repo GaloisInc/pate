@@ -42,8 +42,17 @@ are generalized over concrete, existential and universal quantification.
 module Data.Quant
   ( 
      Quant(..)
+    , type QuantK
+    , type OneK
+    , type ExistsK
+    , type AllK
     , pattern QuantSome
     , toQuantExists
+    , quantToRepr
+    , QuantRepr(..)
+    , ToQuant(..)
+    , HasReprK(..)
+    , ToMaybeQuant(..)
   ) where
 
 import Data.Kind (Type)
@@ -59,6 +68,9 @@ import           Data.Parameterized.TotalMapF ( TotalMapF, HasTotalMapF )
 --   universal quantification
 data QuantK k = OneK k | ExistsK | AllK
 
+type OneK = 'OneK
+type ExistsK = 'ExistsK
+type AllK = 'AllK
 
 -- | Similar to 'KnownRepr' and 'IsRepr' but defines a specific type 'ReprOf' that serves as the runtime representation of
 --   the type parameter for values of type 'f k'
@@ -99,8 +111,9 @@ fromQuantSome x = case x of
     QuantAny y -> Just (Refl,Some y)
     _ -> Nothing
 
--- in most cases we don't care about which 'Quant' was used to form an existential,
--- so this pattern lets us treat them uniformly
+-- | A more convenient interface for handling existential cases, which
+--   doesn't distinguish between universal or concrete for the wrapped
+--   Quant.
 pattern QuantSome :: () => (tp2 ~ ExistsK) => Quant f tp1 -> Quant f tp2
 pattern QuantSome x <- (fromQuantSome -> Just (Refl, Some x))
     where
@@ -128,11 +141,39 @@ instance forall k. HasReprK k => TraversableFC (Quant :: (k -> Type) -> QuantK k
 
 quantToRepr :: Quant f tp -> QuantRepr tp
 quantToRepr = \case
-    QuantOne baserepr _ -> QuantOne baserepr (Const ())
-    QuantAll tm -> QuantAll (fmapF (\_ -> Const()) tm)
-    QuantSome x -> QuantSome (quantToRepr x)
+    QuantOne baserepr _ -> QuantOneRepr baserepr
+    QuantAll{} -> QuantAllRepr
+    QuantSome{} -> QuantSomeRepr
 
-type QuantRepr = Quant (Const ())
+data QuantRepr (tp :: QuantK k0) where
+    QuantOneRepr :: ReprOf k -> QuantRepr (OneK k)
+    QuantAllRepr :: QuantRepr AllK
+    QuantSomeRepr :: QuantRepr ExistsK
+
+instance forall k. (HasReprK k) => TestEquality (QuantRepr :: QuantK k -> Type) where
+    testEquality (QuantOneRepr r1) (QuantOneRepr r2) = case testEquality r1 r2 of
+        Just Refl -> Just Refl
+        Nothing -> Nothing
+    testEquality QuantAllRepr QuantAllRepr = Just Refl
+    testEquality QuantSomeRepr QuantSomeRepr = Just Refl
+    testEquality _ _ = Nothing
+
+instance forall k. (HasReprK k) => OrdF (QuantRepr :: QuantK k -> Type) where
+    compareF (QuantOneRepr r1) (QuantOneRepr r2) = case compareF r1 r2 of
+        EQF -> EQF
+        LTF -> LTF
+        GTF -> GTF
+    compareF QuantAllRepr QuantAllRepr = EQF
+    compareF QuantSomeRepr QuantSomeRepr = EQF
+
+    compareF (QuantOneRepr{}) QuantAllRepr = LTF
+    compareF (QuantOneRepr{}) QuantSomeRepr = LTF
+
+    compareF QuantAllRepr (QuantOneRepr{}) = GTF
+    compareF QuantAllRepr QuantSomeRepr = LTF
+
+    compareF QuantSomeRepr (QuantOneRepr{}) = GTF
+    compareF QuantSomeRepr QuantAllRepr = GTF
 
 instance forall k f. (HasReprK k, (forall x. Ord (f x))) => TestEquality (Quant (f :: k -> Type)) where
     testEquality repr1 repr2 = case (repr1, repr2) of
@@ -188,9 +229,9 @@ class ToQuant f (t1 :: QuantK k) (t2 :: QuantK k) where
 -- Can take a universally quantified variant to any variant
 instance HasReprK k => ToQuant (Quant f) AllK (tp :: QuantK k) where
     toQuant z@(QuantAll f) repr = case repr of
-        QuantOne baserepr _ -> QuantOne baserepr (TMF.apply f baserepr)
-        QuantAll _ -> QuantAll f
-        QuantSome{} -> QuantSome z
+        QuantOneRepr baserepr -> QuantOne baserepr (TMF.apply f baserepr)
+        QuantAllRepr -> QuantAll f
+        QuantSomeRepr -> QuantSome z
 
 -- Can take any variant to an existentially quantified variant
 instance ToQuant (Quant f) (tp :: QuantK k) ExistsK where
@@ -209,11 +250,14 @@ class ToMaybeQuant f (t1 :: QuantK k) (t2 :: QuantK k) where
 instance HasReprK k => ToMaybeQuant (Quant f) (tp1 :: QuantK k) (tp2 :: QuantK k) where
     toMaybeQuant x repr = case (x, repr) of
         (QuantAll{}, _) -> Just (toQuant x repr)
-        (_, QuantSome{}) -> Just (toQuant x repr)
-        (QuantOne baseX x', QuantOne baseY _) -> case testEquality baseX baseY of
+        (_, QuantSomeRepr) -> Just (toQuant x repr)
+        (QuantOne baseX x', QuantOneRepr baseY) -> case testEquality baseX baseY of
             Just Refl -> Just $ QuantOne baseX x'
             -- by definition we can't convert between base types
             Nothing -> Nothing
         (QuantSome x', _) -> toMaybeQuant x' repr
         -- by definition a base type cannot be turned into a universal quantifier
-        (QuantOne{}, QuantAll{}) -> Nothing
+        (QuantOne{}, QuantAllRepr) -> Nothing
+        -- in general we could consider types that themselves have defined conversions between
+        -- their type parameters (i.e nested Quants), but this level of generalization seems excessive without
+        -- good reason
