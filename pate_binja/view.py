@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import io
+import math
 import os.path
 import pprint
 import re
@@ -19,11 +20,11 @@ from binaryninjaui import UIAction, UIActionHandler, Menu, UIActionContext, Flow
     FileContext, UIContext, ViewFrame, ViewLocation, getThemeColor
 
 # PySide6 import MUST be after import of binaryninjaui
-from PySide6.QtCore import Qt, QCoreApplication
-from PySide6.QtGui import QMouseEvent, QAction, QColor, QPaintEvent
+from PySide6.QtCore import Qt, QCoreApplication, QSize
+from PySide6.QtGui import QMouseEvent, QAction, QColor, QPaintEvent, QFontMetrics
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QLineEdit, QPlainTextEdit, QDialog, QWidget, \
     QSplitter, QMenu, QTextEdit, QComboBox, QPushButton, QListWidget, QListWidgetItem, QAbstractItemView, \
-    QDialogButtonBox, QMessageBox, QSpinBox
+    QDialogButtonBox, QMessageBox, QSpinBox, QSizePolicy
 
 from .mcad.PateMcad import PateMcad, CycleCount
 from . import pate
@@ -382,35 +383,33 @@ class DiffWidget(QWidget):
             # Nothing to show
             self.diffField.setText("None")
 
+
 class TraceWidget(QWidget):
     def __init__(self, parent):
         super().__init__(parent)
 
-        self.domainField = QPlainTextEdit()
+        self.domainField = QPlainTextEdit(self)
         self.domainField.setReadOnly(True)
-        self.domainField.setMaximumBlockCount(1000)
 
         self.traceDiff = DiffWidget(self)
 
-        vsplitter = QSplitter()
-        vsplitter.setOrientation(Qt.Orientation.Vertical)
-        vsplitter.addWidget(self.domainField)
-        vsplitter.addWidget(self.traceDiff)
-
-        main_layout = QHBoxLayout()
-        main_layout.addWidget(vsplitter)
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.domainField)
+        main_layout.addWidget(self.traceDiff)
         self.setLayout(main_layout)
 
-    def setTrace(self, trace: dict, label: str = None):
+        self.setTrace(None)
+
+    def setTrace(self, trace: Optional[dict], label: str = None):
         if not trace:
             # Unsat
-            self.domainField.setPlainText('Unsatisfiable')
-            self.traceDiff.clear('Unsatisfiable')
+            self._setDomainText('None')
+            self.traceDiff.clear('None')
             return
 
-        with io.StringIO() as out:
+        with (io.StringIO() as out):
             pate.pprint_node_event_trace_domain(trace, out=out)
-            self.domainField.setPlainText(out.getvalue())
+            self._setDomainText(out.getvalue().rstrip())
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
@@ -448,6 +447,21 @@ class TraceWidget(QWidget):
         else:
             # Only patched
             self.traceDiff.setLinesNoDiff(patchedLines, patchedLabel)
+
+    def _setDomainText(self, text):
+        self.domainField.setPlainText(text)
+        # Hack to make height no bigger than necessary. Tried to do this by creating a new class with
+        # size hint and layout policy, but could not get it to work.
+        #print('Size Hint:', self.domainField.sizeHint())
+        fm = QFontMetrics(self.domainField.font())
+        height = (math.ceil(self.domainField.document().size().height() * fm.height())
+                  + self.domainField.contentsMargins().top()
+                  + self.domainField.contentsMargins().bottom()
+                  + self.domainField.document().documentMargin() * 2
+                  + self.domainField.frameWidth() * 2
+                  )
+        #print('Max Height: ', height)
+        self.domainField.setMaximumHeight(height)
 
 
 class PateCfarExitDialog(QDialog):
@@ -943,7 +957,7 @@ class PateWideningInfoDialog(QDialog):
             top.addWidget(sharedEnvWidget)
 
         # Eq/val selector - pull down? Toggles?
-        self.eqValComboBox = QComboBox()
+        self.eqValComboBox = QComboBox(self)
         self.eqValComboBox.addItem('Equality')
         self.eqValComboBox.addItem('Value')
         self.eqValComboBox.currentIndexChanged.connect(self.eqValComboBoxTextChanged)
@@ -953,7 +967,7 @@ class PateWideningInfoDialog(QDialog):
         eqValSelect.addStretch()
 
         # Locations
-        self.locList = QListWidget()
+        self.locList = QListWidget(self)
         self.locList.currentItemChanged.connect(self.locListItemChanged)
         locLayout = QVBoxLayout()
         locLayout.addWidget(QLabel('Locations:'))
@@ -963,13 +977,13 @@ class PateWideningInfoDialog(QDialog):
         middleLayout = QVBoxLayout()
         middleLayout.addLayout(eqValSelect)
         middleLayout.addLayout(locLayout)
-        middleWidget = QWidget()
+        middleWidget = QWidget(self)
         middleWidget.setLayout(middleLayout)
 
         # trace selector - pulldown? number?
         self.traceSpinBox = QSpinBox()
         self.traceSpinBox.setRange(1,1)
-        self.traceSpinBox.setVisible(False)
+        self.traceSpinBox.setVisible(False)  # Only show when more than 1 trace
         self.traceSpinBox.valueChanged.connect(self.traceSpinBoxValueChanged)
         self.traceLabel = QLabel('Trace:')
         traceSelect = QHBoxLayout()
@@ -979,12 +993,13 @@ class PateWideningInfoDialog(QDialog):
 
         # trace widget
         self.traceWidget = TraceWidget(self)
+        self.traceWidget.setContentsMargins(0,0,0,0)
 
         # bottom - vbox with trace selector and trace widget
         bottomLayout = QVBoxLayout()
         bottomLayout.addLayout(traceSelect)
         bottomLayout.addWidget(self.traceWidget)
-        bottomWidget = QWidget()
+        bottomWidget = QWidget(self)
         bottomWidget.setLayout(bottomLayout)
 
         # Main Splitter (vertical)
