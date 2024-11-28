@@ -873,7 +873,7 @@ data IntermediateEqCond sym arch v =
     }
 
 data EqCondCollector sym arch = EqCondCollector
-  { eqCondFinals :: Map.Map (GraphNode arch) (FinalEquivCond sym arch)
+  { eqCondFinals :: Map.Map (GraphNode arch) (ConditionTraces sym arch)
   , eqCondInterims :: Map.Map (GraphNode arch) (PS.SimSpec sym arch (IntermediateEqCond sym arch))
   , eqCondConstraints :: PTC.TraceConstraintMap sym arch
   }
@@ -906,7 +906,7 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
 
       
       let
-        rest :: forall v. PS.SimScope sym arch v -> IntermediateEqCond sym arch v -> EquivM_ sym arch (Maybe (FinalEquivCond sym arch))
+        rest :: forall v. PS.SimScope sym arch v -> IntermediateEqCond sym arch v -> EquivM_ sym arch (Maybe (ConditionTraces sym arch))
         rest scope (IntermediateEqCond bundle fps _ _ cond d) =  withSym $ \sym -> do
           trace_constraint <- case Map.lookup nd tcm of
             Just tc -> IO.liftIO $ PTC.constraintListToPred sym tc
@@ -917,7 +917,7 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
               (Nothing, Nothing) -> return Nothing
               _ -> do
                 cond_pretty <- PSi.applySimpStrategy PSi.prettySimplifier cond
-                return $ Just (FinalEquivCond cond_pretty mtraceT mtraceF fps)
+                return $ Just (ConditionTraces cond_pretty mtraceT mtraceF fps)
               
           case mres of
             Just res -> return res
@@ -935,18 +935,8 @@ showFinalResult pg0 = withTracing @"final_result" () $ withSym $ \sym -> do
               fmap fst $ withGraphNode scope nd pg $ \bundle d -> do
                 cond_simplified <- PSi.applySimpStrategy PSi.deepPredicateSimplifier cond
                 eqCond_pred <- PEC.toPred sym cond_simplified
-                fps <- getTraceFootprint scope bundle
-                vs <- PPa.forBinsC $ \bin -> do
-                  fp <- PPa.getC bin fps
-                  (v, env) <- liftIO $ W4S.w4ToJSONEnv sym fp
-                  -- only visible with debug tag
-                  emitTraceLabel @"trace_footprint" v fp
-                  return (v, env)
-                eenv <- PPa.joinPatchPred (\a b -> return $ W4S.mergeEnvs a b) $ \bin -> snd <$> (PPa.getC bin vs)
-                fpvs <- PPa.forBinsC $ \bin -> do
-                  fp <- PPa.getC bin fps
-                  (v,_) <- PPa.getC bin vs
-                  return (fp,v)
+                (partialTraces, eenv) <- toConditionTraces scope bundle eqCond_pred Nothing Nothing
+                let fpvs = eqFootprints partialTraces
                 asms <- currentAsm
                 let ieqc = IntermediateEqCond bundle fpvs eenv asms eqCond_pred d 
                 let interims = Map.insert nd (PS.mkSimSpec scope ieqc) (eqCondInterims rs)
@@ -976,18 +966,46 @@ data FinalResult sym arch = FinalResult
   { 
     _finEqStatus :: PE.EquivalenceStatus
   , _finObservableCE ::  Map.Map (NodeEntry arch) (CE.ObservableCounterexample sym arch)
-  , _finEqConds :: Map.Map (GraphNode arch) (FinalEquivCond sym arch)
+  , _finEqConds :: Map.Map (GraphNode arch) (ConditionTraces sym arch)
   }
 
-data FinalEquivCond sym arch = FinalEquivCond
+data ConditionTraces sym arch = ConditionTraces
   { 
-    _finEqCondPred :: W4.Pred sym
-  , _finEqCondTraceTrue :: Maybe (CE.TraceEvents sym arch)
-  , _finEqCondTraceFalse :: Maybe (CE.TraceEvents sym arch)
+    _eqCondPred :: W4.Pred sym
+  , _eqCondTraceTrue :: Maybe (CE.TraceEvents sym arch)
+  , _eqCondTraceFalse :: Maybe (CE.TraceEvents sym arch)
   -- small hack to include the footprint serialized according to the expression environment
-  , _finEqFootprints :: PPa.PatchPairC (CE.TraceFootprint sym arch, JSON.Value)
+  , eqFootprints :: PPa.PatchPairC (CE.TraceFootprint sym arch, JSON.Value)
   }
 
+instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "condition_traces" where
+  type TraceNodeType '(sym,arch) "condition_traces" = ConditionTraces sym arch
+  prettyNode _ _ = "Condition Traces"
+  nodeTags = mkTags @'(sym, arch) @"condition_traces" [Simplified, Summary]
+  jsonNode sym () v = W4S.w4ToJSON sym v
+
+
+toConditionTraces :: 
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  W4.Pred sym ->
+  Maybe (CE.TraceEvents sym arch) -> 
+  Maybe (CE.TraceEvents sym arch) ->
+  EquivM sym arch (ConditionTraces sym arch, W4S.ExprEnv sym)
+toConditionTraces scope bundle p mtraceT mtraceF = withSym $ \sym -> do
+  fps <- getTraceFootprint scope bundle
+  vs <- PPa.forBinsC $ \bin -> do
+    fp <- PPa.getC bin fps
+    (v, env) <- liftIO $ W4S.w4ToJSONEnv sym fp
+    -- only visible with debug tag
+    emitTraceLabel @"trace_footprint" v fp
+    return (v, env)
+  eenv <- PPa.joinPatchPred (\a b -> return $ W4S.mergeEnvs a b) $ \bin -> snd <$> (PPa.getC bin vs)
+  fpvs <- PPa.forBinsC $ \bin -> do
+    fp <- PPa.getC bin fps
+    (v,_) <- PPa.getC bin vs
+    return (fp,v)
+  return (ConditionTraces p mtraceT mtraceF fpvs, eenv)
 
 instance W4S.W4Serializable sym (PE.EquivalenceStatus) where
   w4Serialize st = W4S.w4SerializeString st
@@ -996,8 +1014,8 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalR
   w4Serialize (FinalResult st obs conds) = do
     W4S.object [ "eq_status" W4S..= st, "observable_counterexamples" W4S..= obs, "eq_conditions" W4S..= conds ]
 
-instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalEquivCond sym arch) where
-  w4Serialize (FinalEquivCond p trT trF fps) = do
+instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (ConditionTraces sym arch) where
+  w4Serialize (ConditionTraces p trT trF fps) = do
     W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF, "trace_footprint" W4S..= (TF.fmapF (\(Const(_,v)) -> Const v) fps) ]
 
 
@@ -1324,9 +1342,6 @@ getTracesForPred ::
 getTracesForPred scope bundle dom p = withSym $ \sym -> do
   not_p <- liftIO $ W4.notPred sym p
   emitTraceLabel @"expr" "Predicate" (Some p)
-  withTracing @"message" "Simplified Predicate" $ withForkedSolver_ $ do
-    p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
-    emitTrace @"expr" (Some p_pretty)
   mtraceT <- withTracing @"message" "With condition assumed" $
     withSatAssumption (PAS.fromPred p) $ do
       traceT <- getSomeGroundTrace scope bundle dom Nothing
@@ -1337,6 +1352,11 @@ getTracesForPred scope bundle dom p = withSym $ \sym -> do
       traceF <- getSomeGroundTrace scope bundle dom Nothing
       emitTrace @"trace_events" traceF
       return traceF
+  withTracing @"message" "Simplified Predicate" $ withForkedSolver_ $ do
+    p_pretty <- withTracing @"debug" "simplifier" $ PSi.applySimpStrategy PSi.prettySimplifier p
+    emitTrace @"expr" (Some p_pretty)
+    (trs, _) <- toConditionTraces scope bundle p_pretty mtraceT mtraceF
+    emitTrace @"condition_traces" trs
   return (mtraceT, mtraceF)
   
 withConditionsAssumed ::
