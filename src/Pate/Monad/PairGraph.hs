@@ -167,7 +167,7 @@ initializePairGraph pPairs = foldM (\x y -> initPair x y) emptyPairGraph pPairs
   where
     initPair :: PairGraph sym arch -> PB.FunPair arch -> EquivM sym arch (PairGraph sym arch)
     initPair gr fnPair =
-      do let bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
+      do let bPair = PPa.map PB.functionEntryToConcreteBlock fnPair
          withPair bPair $ do
            -- initial state of the pair graph: choose the universal domain that equates as much as possible
            let node = GraphNode (rootEntry bPair)
@@ -205,7 +205,7 @@ initialDomainSpec (GraphNodeEntry blocks) = withTracing @"function_name" "initia
     dom <- initialDomain
     return (mempty, dom)
 initialDomainSpec (GraphNodeReturn fPair) = withTracing @"function_name" "initialDomainSpec" $ do
-  let blocks = TF.fmapF PB.functionEntryToConcreteBlock fPair
+  let blocks = PPa.map PB.functionEntryToConcreteBlock fPair
   withFreshVars blocks $ \_vars -> do
     dom <- initialDomain
     return (mempty, dom)

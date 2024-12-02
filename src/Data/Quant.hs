@@ -53,16 +53,25 @@ module Data.Quant
     , ToQuant(..)
     , HasReprK(..)
     , ToMaybeQuant(..)
+    , pattern QuantToOne
+    , generateAll
+    , generateAllM
+    , pattern QuantAsAll
+    , pattern QuantAsOne
   ) where
 
-import Data.Kind (Type)
+import           Data.Kind (Type)
+import           Data.Constraint
+
 import Data.Functor.Const
+import Data.Proxy
 import Data.Parameterized.TraversableF
 import Data.Parameterized.TraversableFC
 import Data.Parameterized.Classes
 import Data.Parameterized.Some
 import qualified Data.Parameterized.TotalMapF as TMF
 import           Data.Parameterized.TotalMapF ( TotalMapF, HasTotalMapF )
+import           Data.Parameterized.WithRepr
 
 -- | Wraps the kind 'k' with additional cases for existential and
 --   universal quantification
@@ -72,12 +81,13 @@ type OneK = 'OneK
 type ExistsK = 'ExistsK
 type AllK = 'AllK
 
+type KnownHasRepr (k0 :: k) = KnownRepr (ReprOf :: k -> Type) k0
+
 -- | Similar to 'KnownRepr' and 'IsRepr' but defines a specific type 'ReprOf' that serves as the runtime representation of
 --   the type parameter for values of type 'f k'
-class (HasTotalMapF (ReprOf :: k -> Type), TestEquality (ReprOf :: k -> Type), OrdF (ReprOf :: k -> Type)) => HasReprK k where
+class (HasTotalMapF (ReprOf :: k -> Type), TestEquality (ReprOf :: k -> Type), OrdF (ReprOf :: k -> Type), IsRepr (ReprOf :: k -> Type)) => HasReprK k where
     type ReprOf :: k -> Type
-    
--- we need this so that quantification is necessarily bounded in order to meaningfully compare universally quantified values
+
 allReprs :: forall k. HasReprK k => TotalMapF (ReprOf :: k -> Type)  (Const ())
 allReprs = TMF.totalMapRepr @(ReprOf :: k -> Type) 
 
@@ -95,6 +105,12 @@ data Quant (f :: k0 -> Type) (tp :: QuantK k0) where
     -- the above two cases, but existentially wrapped
     QuantExists :: Quant f (OneK k) -> Quant f ExistsK
     QuantAny :: Quant f AllK -> Quant f ExistsK
+
+generateAll :: HasReprK k => (forall (x :: k). ReprOf x -> f x) -> Quant f AllK
+generateAll f = QuantAll $ TMF.mapWithKey (\k _ -> f k) allReprs
+
+generateAllM :: (HasReprK k, Applicative m) => (forall (x :: k). ReprOf x -> m (f x)) -> m (Quant f AllK)
+generateAllM f = QuantAll <$> TMF.traverseWithKey (\k _ -> f k) allReprs
 
 -- Drop the type information from a 'Quant' by making it existential instead.
 toQuantExists :: Quant f tp1 -> Quant f ExistsK
@@ -121,6 +137,7 @@ pattern QuantSome x <- (fromQuantSome -> Just (Refl, Some x))
 
 {-# COMPLETE QuantOne, QuantAll, QuantSome #-}
 
+
 instance FunctorFC Quant where
     fmapFC f = \case
         QuantOne repr x -> QuantOne repr (f x)
@@ -139,6 +156,9 @@ instance forall k. HasReprK k => TraversableFC (Quant :: (k -> Type) -> QuantK k
         QuantAll g -> QuantAll <$> traverseF f g
         QuantSome x -> QuantSome <$> traverseFC f x
 
+
+
+
 quantToRepr :: Quant f tp -> QuantRepr tp
 quantToRepr = \case
     QuantOne baserepr _ -> QuantOneRepr baserepr
@@ -149,6 +169,17 @@ data QuantRepr (tp :: QuantK k0) where
     QuantOneRepr :: ReprOf k -> QuantRepr (OneK k)
     QuantAllRepr :: QuantRepr AllK
     QuantSomeRepr :: QuantRepr ExistsK
+
+instance KnownHasRepr x => KnownRepr (QuantRepr :: QuantK k0 -> Type) (OneK (x :: k0)) where
+    knownRepr = QuantOneRepr knownRepr
+
+instance KnownRepr QuantRepr AllK where
+    knownRepr = QuantAllRepr
+
+instance KnownRepr QuantRepr ExistsK where
+    knownRepr = QuantSomeRepr
+
+instance IsRepr (ReprOf :: k -> Type) => IsRepr (QuantRepr :: QuantK k -> Type)
 
 instance forall k. (HasReprK k) => TestEquality (QuantRepr :: QuantK k -> Type) where
     testEquality (QuantOneRepr r1) (QuantOneRepr r2) = case testEquality r1 r2 of
@@ -175,7 +206,7 @@ instance forall k. (HasReprK k) => OrdF (QuantRepr :: QuantK k -> Type) where
     compareF QuantSomeRepr (QuantOneRepr{}) = GTF
     compareF QuantSomeRepr QuantAllRepr = GTF
 
-instance forall k f. (HasReprK k, (forall x. Ord (f x))) => TestEquality (Quant (f :: k -> Type)) where
+instance forall k f. (HasReprK k, (forall x. Eq (f x))) => TestEquality (Quant (f :: k -> Type)) where
     testEquality repr1 repr2 = case (repr1, repr2) of
         (QuantOne baserepr1 x1, QuantOne baserepr2 x2) -> case testEquality baserepr1 baserepr2 of
             Just Refl | x1 == x2 -> Just Refl
@@ -222,6 +253,15 @@ instance forall k f. (HasReprK k, (forall x. Ord (f x))) => OrdF (Quant (f :: k 
         (QuantAny{}, QuantAll{}) -> GTF
         (QuantAny{}, QuantExists{}) -> GTF
 
+instance (HasReprK k, forall x. Eq (f x)) => Eq (Quant (f :: k -> Type) tp) where
+    q1 == q2 = case testEquality q1 q2 of
+        Just Refl -> True
+        Nothing -> False
+
+instance (HasReprK k, forall x. Ord (f x)) => Ord (Quant (f :: k -> Type) tp) where
+    compare q1 q2 = toOrdering $ compareF q1 q2
+
+
 -- Defining which conversions are always possible
 class ToQuant f (t1 :: QuantK k) (t2 :: QuantK k) where
     toQuant :: f t1 -> QuantRepr t2 -> f t2
@@ -261,3 +301,63 @@ instance HasReprK k => ToMaybeQuant (Quant f) (tp1 :: QuantK k) (tp2 :: QuantK k
         -- in general we could consider types that themselves have defined conversions between
         -- their type parameters (i.e nested Quants), but this level of generalization seems excessive without
         -- good reason
+
+
+data AsOneK (f :: QuantK k -> Type) (y :: k) where
+    AsOneK :: f (OneK y) -> AsOneK f y
+
+
+class (Antecedent p c => c) => Implies p c where
+    type Antecedent p c :: Constraint
+
+instance Implies (IsOneK AllK) c where
+    type Antecedent (IsOneK AllK) c = c
+
+instance Implies (IsOneK ExistsK) c where
+    type Antecedent (IsOneK ExistsK) c = c
+
+instance c => Implies (IsOneK (OneK k)) c where
+    type Antecedent (IsOneK (OneK k)) c = IsOneK (OneK k)
+
+class (tp ~ (OneK (TheOneK tp))) => IsOneK tp where
+    type TheOneK tp :: k
+
+instance IsOneK (OneK k) where
+    type TheOneK (OneK k) = k
+
+
+asQuantOne :: forall k (x :: k) f tp. HasReprK k => ReprOf x -> Quant (f :: k -> Type) (tp :: QuantK k) -> Maybe (Dict (KnownRepr QuantRepr tp), Dict (Implies (IsOneK tp) (x ~ TheOneK tp)), ReprOf x, f x)
+asQuantOne repr = \case
+    QuantOne repr' f | Just Refl <- testEquality repr' repr -> Just (withRepr (QuantOneRepr repr') $ Dict, Dict, repr, f)
+    QuantOne{} -> Nothing
+    QuantAll tm -> Just (Dict, Dict, repr, TMF.apply tm repr)
+    QuantExists x -> case asQuantOne repr x of
+        Just (Dict, _, _, x') -> Just (Dict, Dict, repr, x')
+        Nothing -> Nothing
+    QuantAny (QuantAll f) -> Just (Dict, Dict, repr, TMF.apply f repr)
+
+-- | Cast a 'Quant' to a specific instance of 'x' if it contains it. Pattern match failure otherwise.
+pattern QuantToOne :: forall {k} x f tp. (KnownHasRepr (x :: k), HasReprK k) => ( KnownRepr QuantRepr tp, Implies (IsOneK tp) (x ~ TheOneK tp)) => f x -> Quant f tp
+pattern QuantToOne fx <- (asQuantOne (knownRepr :: ReprOf x) -> Just (Dict, Dict, _, fx))
+
+
+-- | Project a total function from a 'Quant' if it is universally quantified.
+pattern QuantAsAll :: forall {k} f tp. (HasReprK k) => () => (forall x. ReprOf x -> f x) -> Quant (f :: k -> Type) tp
+pattern QuantAsAll f <- ((\l -> (case toMaybeQuant l QuantAllRepr of Just (QuantAll f) -> Just (TMF.apply f); _ -> Nothing)  :: Maybe (forall (x :: k). ReprOf x -> f x) ) -> Just (f))
+
+data QuantAsOneProof (f :: k -> Type) (tp :: QuantK k) where
+    QuantAsOneProof :: (KnownRepr QuantRepr tp, Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> QuantAsOneProof f tp
+
+
+quantAsOne :: forall k f tp. HasReprK k => Quant (f :: k -> Type) (tp :: QuantK k) -> Maybe (QuantAsOneProof f tp)
+quantAsOne q = case q of
+    QuantOne repr x-> withRepr repr $ Just (QuantAsOneProof repr x)
+    QuantExists q' -> case quantAsOne q' of
+        Just (QuantAsOneProof repr x) -> Just $ QuantAsOneProof repr x
+        Nothing -> Nothing
+    _ -> Nothing
+
+
+-- | Project out the element of a singleton 'Quant'
+pattern QuantAsOne :: forall {k} f tp. (HasReprK k) => forall x. (KnownRepr QuantRepr tp, Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
+pattern QuantAsOne repr x <- (quantAsOne -> Just (QuantAsOneProof repr x))

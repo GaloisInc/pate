@@ -39,6 +39,9 @@ where
 import           Data.Parameterized.WithRepr
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
+import qualified Data.Parameterized.TotalMapF as TMF
+import qualified Data.Quant as Qu
+import           Data.Quant ( Quant, QuantK)
 import qualified Prettyprinter as PP
 import           Pate.TraceTree
 
@@ -119,3 +122,10 @@ instance KnownRepr WhichBinaryRepr Patched where
 type KnownBinary (bin :: WhichBinary) = KnownRepr WhichBinaryRepr bin
 
 instance IsRepr WhichBinaryRepr
+
+instance TMF.HasTotalMapF WhichBinaryRepr where
+  allValues = [Some OriginalRepr, Some PatchedRepr]
+
+instance Qu.HasReprK WhichBinary where
+  type ReprOf = WhichBinaryRepr
+

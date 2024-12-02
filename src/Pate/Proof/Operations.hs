@@ -163,7 +163,7 @@ noTransition ::
   EquivM sym arch (PF.BlockSliceTransition sym arch)
 noTransition scope stIn blockEnd = do
   let
-    stOut = TF.fmapF (\st -> PS.SimOutput (PS.simInState st) blockEnd) stIn
+    stOut = PPa.map (\st -> PS.SimOutput (PS.simInState st) blockEnd) stIn
     bundle = PS.SimBundle stIn stOut
   simBundleToSlice scope bundle
 

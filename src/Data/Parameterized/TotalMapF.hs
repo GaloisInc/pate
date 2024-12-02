@@ -30,6 +30,8 @@ module Data.Parameterized.TotalMapF
     , apply
     , compose
     , zip
+    , mapWithKey
+    , traverseWithKey
   ) where
 
 import           Prelude hiding ( zip )
@@ -55,6 +57,12 @@ newtype TotalMapF (a :: k -> Type) (b :: k -> Type) = TotalMapF (MapF a b)
 instance TraversableF (TotalMapF a) where
   traverseF f (TotalMapF tm) = TotalMapF <$> traverseF f tm
 
+mapWithKey :: (forall x. a x -> b x -> c x) -> TotalMapF a b -> TotalMapF a c
+mapWithKey f (TotalMapF m) = TotalMapF $ MapF.mapWithKey f m
+
+traverseWithKey :: Applicative m => (forall x. a x -> b x -> m (c x)) -> TotalMapF a b -> m (TotalMapF a c)
+traverseWithKey f (TotalMapF m) = TotalMapF <$> MapF.traverseWithKey f m
+
 instance (TestEquality a, (forall x. (Eq (b x)))) => Eq (TotalMapF a b) where
   m1 == m2 = all (\(MapF.Pair _ (PairF b1 b2)) -> b1 == b2) (zipToList m1 m2)
 
@@ -77,7 +85,7 @@ class HasTotalMapF a where
 totalMapRepr :: forall a. (OrdF a, HasTotalMapF a) => TotalMapF a (Const ())
 totalMapRepr = TotalMapF $ MapF.fromList (map (\(Some x) -> MapF.Pair x (Const ())) $ allValues @a)
 
-apply :: OrdF a => TotalMapF a b -> (forall x. a x -> b x)
+apply :: OrdF a => TotalMapF (a :: k -> Type) b -> (forall x. a x -> b x)
 apply (TotalMapF m) k = case MapF.lookup k m of
   Just v -> v
   Nothing -> error "TotalMapF apply: internal failure. Likely 'HasTotalMapF' instance is incomplete."
