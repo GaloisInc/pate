@@ -66,7 +66,6 @@ module Pate.Verification.PairGraph.Node (
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
 import qualified Data.Aeson as JSON
 import qualified Compat.Aeson as HMS
-import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
@@ -138,7 +137,7 @@ pattern NodeReturn ctx bp = NodeContent ctx bp
 
 graphNodeBlocks :: GraphNode arch -> PB.BlockPair arch
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
-graphNodeBlocks (ReturnNode ret) = TF.fmapF PB.functionEntryToConcreteBlock (nodeFuns ret)
+graphNodeBlocks (ReturnNode ret) = PPa.map PB.functionEntryToConcreteBlock (nodeFuns ret)
 
 nodeContext :: GraphNode arch -> CallingContext arch
 nodeContext (GraphNode nd) = nodeContentCtx nd
@@ -296,16 +295,16 @@ splitGraphNode nd = do
 
 -- | Get the node corresponding to the entry point for the function
 returnToEntry :: NodeReturn arch -> NodeEntry arch
-returnToEntry (NodeReturn ctx fns) = NodeEntry (mkNextContext fns ctx) (TF.fmapF PB.functionEntryToConcreteBlock fns)
+returnToEntry (NodeReturn ctx fns) = NodeEntry (mkNextContext fns ctx) (PPa.map PB.functionEntryToConcreteBlock fns)
 
 -- | Get the return node that this entry would return to
 returnOfEntry :: NodeEntry arch -> NodeReturn arch
-returnOfEntry (NodeEntry ctx blks) = NodeReturn (mkNextContext blks ctx) (TF.fmapF PB.blockFunctionEntry blks)
+returnOfEntry (NodeEntry ctx blks) = NodeReturn (mkNextContext blks ctx) (PPa.map PB.blockFunctionEntry blks)
 
 -- | For an intermediate entry point in a function, find the entry point
 --   corresponding to the function start
 functionEntryOf :: NodeEntry arch -> NodeEntry arch
-functionEntryOf (NodeEntry ctx blks) = NodeEntry (mkNextContext blks ctx) (TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) blks)
+functionEntryOf (NodeEntry ctx blks) = NodeEntry (mkNextContext blks ctx) (PPa.map (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) blks)
 
 instance PA.ValidArch arch => Show (CallingContext arch) where
   show c = show (pretty c)

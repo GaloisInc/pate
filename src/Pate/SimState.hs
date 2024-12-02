@@ -373,7 +373,7 @@ bundleInVars :: SimScope sym arch v -> SimBundle sym arch v -> (SimVars sym arch
 bundleInVars scope bundle = let (stO,stP) = asStatePair scope (simIn bundle) simInState in (SimVars stO, SimVars stP)
 
 simPair :: SimBundle sym arch v -> PB.BlockPair arch
-simPair bundle = TF.fmapF simInBlock (simIn bundle)
+simPair bundle = PPa.map simInBlock (simIn bundle)
 
 ---------------------------------------
 -- Variable binding
