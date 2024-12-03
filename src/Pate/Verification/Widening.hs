@@ -34,6 +34,8 @@ module Pate.Verification.Widening
   , addToEquivCondition
   , strengthenPredicate
   , getTraceFootprint
+  , propagateCondition
+  , propagateOne
   ) where
 
 import           GHC.Stack
@@ -176,9 +178,7 @@ getEquivPostCondition scope bundle to condK gr = withSym $ \sym -> do
   -- this condition is *implied* by the 'from' equivalence condition and equivalence domain
   let outVars = PS.bundleOutVars scope bundle
   case getCondition gr to condK of
-    Just condSpec -> do
-      (_asm, cond) <- liftIO $ PS.bindSpec sym outVars condSpec
-      return cond
+    Just condSpec -> liftIO $ PS.bindSpec sym outVars condSpec
     Nothing -> return $ PEC.universal sym
 
 extractPtrs ::
@@ -426,7 +426,7 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
       env <- CMR.ask
       let conds = Map.fromList $ mapMaybe (\condK -> case getCondition gr2 nd condK of {Just eqSpec -> Just (condK, eqSpec); Nothing -> Nothing}) [minBound..maxBound]
 
-      conds' <- mapM (\spec -> snd <$> (liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec)) conds
+      conds' <- mapM (\spec -> (liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) spec)) conds
       let b = InteractiveBundle scope bundle nd gr2 d conds' env
       -- TODO: allow updates here
       emitTrace @"interactiveBundle" b
@@ -434,7 +434,7 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
     choice "Strengthen conditions" $ \(TupleF3 scope bundle d) gr2 -> withSym $ \sym -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
             Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
-              (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
+              eqCond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
               eqCond' <- strengthenCondition eqCond
               priority <- thisPriority
               let propK = getPropagationKind gr0_ nd condK
@@ -445,7 +445,7 @@ addRefinementChoice nd gr0 = withTracing @"message" ("Modify Proof Node: " ++ sh
     choice "Simplify conditions" $ \(TupleF3 scope _bundle _) gr2 -> do
       let go condK gr0_ = case getCondition gr0_ nd condK of
             Just eqCondSpec -> withTracing @"message" (conditionName condK) $ withSym $ \sym -> do
-              (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
+              eqCond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) eqCondSpec
               eqCond_pred <- PEC.toPred sym eqCond
               emitTraceLabel @"eqcond" (PEE.someExpr sym eqCond_pred) (Some eqCond)
               meqCond_pred' <- isPredTrue' goalTimeout eqCond_pred >>= \case
@@ -798,7 +798,7 @@ isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
   goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
   -- rewrite the free variables for the other binary into arbitrary (free) terms and
   -- determine if the resulting predicate is equal to the original
-  fmap (\x -> PS.viewSpecBody x PS.unWS) $ withFreshScope blks $ \(scope2 :: PS.SimScope sym arch v2) -> do
+  withFreshScope blks $ \(scope2 :: PS.SimScope sym arch v2) -> do
     (this_vars :: PS.SimVars sym arch v2 bin) <- PPa.get bin (PS.scopeVars (PS.unsafeCoerceScope scope))
     (vars2 :: PS.SimVars sym arch v2 (PBi.OtherBinary bin)) <- PPa.get (PBi.flipRepr bin) (PS.scopeVars scope2)
 
@@ -808,15 +808,59 @@ isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
     eqCond_pred <- PEC.toPred sym eqCond
     eqCond2_pred <- PEC.toPred sym eqCond2
     conds_eq <- liftIO $ W4.isEq sym eqCond_pred eqCond2_pred
-    PS.WithScope <$> isPredTrue' goalTimeout conds_eq
+    isPredTrue' goalTimeout conds_eq
 
-
+-- | Propagate the given condition kind backwards (from 'to' node to 'from' node).
+--   Does not do any other graph maintenance (i.e. dropping stale domains or re-queuing nodes)
+propagateOne ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  ConditionKind ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
+  Nothing -> do
+    emitTrace @"debug" "No condition to propagate"
+    return Nothing
+  Just{} -> do
+    -- take the condition of the target edge and bind it to
+    -- the output state of the bundle
+    cond_ <- getEquivPostCondition scope bundle to condK gr0
+    simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
+    cond <- PSi.applySimplifier simplifier cond_
+        -- check if the "to" condition is already satisifed, otherwise
+        -- we need to update our own condition
+    cond_pred <- PEC.toPred sym cond
+    goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+    isPredSat' goalTimeout cond_pred >>= \case
+      Just False -> do
+        emitTrace @"message" "Condition is infeasible, dropping branch."
+        Just <$> pruneCurrentBranch scope (from,to) condK gr0
+      _ | not (shouldPropagate (getPropagationKind gr0 to condK)) -> do
+        emitTrace @"debug" "Condition not propagated"
+        return Nothing
+      _ -> do
+        not_cond <- liftIO $ W4.notPred sym cond_pred
+        isPredSat' goalTimeout not_cond >>= \case
+          -- equivalence condition for this path holds, we 
+          -- don't need any changes
+          Just False -> do
+            emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
+            return Nothing
+          -- we need more assumptions for this condition to hold
+          Just True -> do
+            emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
+            let propK = getPropagationKind gr0 to condK
+            gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr0
+            return $ Just $ (markEdge from to gr1)
+          Nothing -> throwHere $ PEE.InconclusiveSAT
 
 -- | Push an assertion back up the graph.
 --   Returns 'Nothing' if there is nothing to do (i.e. no assertion or
 --   existing assertion is already implied)
-
-
 propagateCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
@@ -833,64 +877,13 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
     False -> return Nothing
     True -> return $ Just gr3
   where
-    go condK gr = withSym $ \sym -> do
-      case getCondition gr to condK of
-        -- no target equivalence condition, nothing to do
-        Nothing -> do
-          emitTrace @"debug" "No condition to propagate"
-          return Nothing
-        Just{} -> do
-          -- take the condition of the target edge and bind it to
-          -- the output state of the bundle
-          cond_ <- getEquivPostCondition scope bundle to condK gr
-          simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
-          cond <- PSi.applySimplifier simplifier cond_
-{-
-
-
-          let blks = graphNodeBlocks from
-          skip <- case (blks, graphNodeBlocks to) of
-            -- this is a synchronization edge, so we attempt to filter the equivalence condition
-            -- based on whether or not it has variables scoped to only the other side of the analysis
-            -- FIXME: we can likely do better than this and formally separate the conditions, but
-            -- this is sufficient for now, and avoids the obvious case
-            (PPa.PatchPairSingle bin _,PPa.PatchPair{}) -> isEqCondSingleSided scope blks (PBi.flipRepr bin) cond
-            _ -> return False
-          case skip of
-            True -> do
-              emitTrace @"message" "Skipping single-sided propagation"
-              return Nothing
-            False -> do
--}
-              -- check if the "to" condition is already satisifed, otherwise
-              -- we need to update our own condition
-          cond_pred <- PEC.toPred sym cond
-          goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-          isPredSat' goalTimeout cond_pred >>= \case
-            Just False -> do
-              emitTrace @"message" "Condition is infeasible, dropping branch."
-              Just <$> pruneCurrentBranch scope (from,to) condK gr
-            _ | not (shouldPropagate (getPropagationKind gr to condK)) -> do
-              emitTrace @"debug" "Condition not propagated"
-              return Nothing
-            _ -> do
-              not_cond <- liftIO $ W4.notPred sym cond_pred
-              isPredSat' goalTimeout not_cond >>= \case
-                -- equivalence condition for this path holds, we 
-                -- don't need any changes
-                Just False -> do
-                  emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
-                  return Nothing
-                -- we need more assumptions for this condition to hold
-                Just True -> do
-                  priority <- thisPriority
-                  emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
-                  let propK = getPropagationKind gr to condK
-                  gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr
-                  return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
-                    queueNode (priority PriorityNodeRecheck) from $ 
-                    dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr1)
-                Nothing -> throwHere $ PEE.InconclusiveSAT
+    go condK gr = propagateOne scope bundle from to condK gr >>= \case
+      Nothing -> return Nothing
+      Just gr' -> do
+        priority <- thisPriority
+        return $ Just $ queueAncestors (priority PriorityPropagation) from $ 
+          queueNode (priority PriorityNodeRecheck) from $ 
+          dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr')
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -989,33 +982,32 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
             -- values of the slice again. This is accomplised by 'abstractOverVars', which
             -- produces the final 'AbstractDomainSpec' that has been fully abstracted away
             -- from the current scope and can be stored as the updated domain in the 'PairGraph'
-            (asm, d') <- liftIO $ PS.bindSpec sym (PS.bundleOutVars scope bundle) postSpec
-            withAssumptionSet asm $ do
-              md <- widenPostcondition scope bundle d d'
-              case md of
-                NoWideningRequired ->
-                  do traceBundle bundle "Did not need to widen"
-                     emitTraceLabel @"domain" PAD.Postdomain (Some d')
-                     finalizeGraphEdge scope bundle d d' from to gr
+            d' <- liftIO $ PS.bindSpec sym (PS.bundleOutVars scope bundle) postSpec
+            md <- widenPostcondition scope bundle d d'
+            case md of
+              NoWideningRequired -> do
+                traceBundle bundle "Did not need to widen"
+                emitTraceLabel @"domain" PAD.Postdomain (Some d')
+                finalizeGraphEdge scope bundle d d' from to gr
 
-                WideningError msg _ d'' ->
-                  do let msg' = ("Error during widening: " ++ msg)
-                     err <- emitError' (PEE.WideningError msg')
-                     postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                     case updateDomain gr from to postSpec' (priority PriorityWidening) of
-                       Left gr' ->
-                         do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                            return $ recordMiscAnalysisError gr' to err
-                       Right gr' -> return $ recordMiscAnalysisError gr' to err
+              WideningError msg _ d'' -> do
+                let msg' = ("Error during widening: " ++ msg)
+                err <- emitError' (PEE.WideningError msg')
+                postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                case updateDomain gr from to postSpec' (priority PriorityWidening) of
+                  Left gr' -> do
+                    traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
+                    return $ recordMiscAnalysisError gr' to err
+                  Right gr' -> return $ recordMiscAnalysisError gr' to err
 
-                Widen _ _ d'' -> do
-                  emitTraceLabel @"domain" PAD.Postdomain (Some d'')
-                  postSpec' <- abstractOverVars scope bundle from to postSpec d''
-                  case updateDomain gr from to postSpec' (priority PriorityWidening) of
-                    Left gr' -> do
-                      do traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
-                         finalizeGraphEdge scope bundle d d'' from to gr'
-                    Right gr' -> finalizeGraphEdge scope bundle d d'' from to gr'
+              Widen _ _ d'' -> do
+                emitTraceLabel @"domain" PAD.Postdomain (Some d'')
+                postSpec' <- abstractOverVars scope bundle from to postSpec d''
+                case updateDomain gr from to postSpec' (priority PriorityWidening) of
+                  Left gr' -> do
+                    traceBundle bundle ("Ran out of gas while widening postconditon! " ++ show from ++ " " ++ show to)
+                    finalizeGraphEdge scope bundle d d'' from to gr'
+                  Right gr' -> finalizeGraphEdge scope bundle d d'' from to gr'
 
 
 finalizeGraphEdge ::

@@ -82,11 +82,14 @@ module Pate.Verification.PairGraph
   , emptyWorkList
   , SyncData
   , SyncPoint(..)
+  , syncData
   , getSyncData
   , modifySyncData
   , syncPoints
   , syncCutAddresses
   , syncExceptions
+  , syncStates
+  , syncBindings
   , singleNodeRepr
   , edgeActions
   , nodeActions
@@ -132,6 +135,8 @@ module Pate.Verification.PairGraph
   , isSyncNode
   , queueExitMerges
   , setPropagationKind
+  , initFnBindings
+  , addFnBindings
   ) where
 
 import           Prettyprinter
@@ -154,6 +159,8 @@ import           Data.Map (Map)
 import qualified Data.Map as Map
 import           Data.Maybe (fromMaybe, catMaybes)
 import           Data.Parameterized.Classes
+import           Data.Parameterized.Map ( MapF )
+import qualified Data.Parameterized.Map as MapF
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word (Word32)
@@ -186,6 +193,7 @@ import qualified Pate.Verification.AbstractDomain as PAD
 import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDomainSpec )
 import           Pate.TraceTree
 import qualified Pate.Binary as PBi
+import qualified Pate.Verification.FnBindings as PFn
 
 import           Control.Applicative (Const(..), Alternative(..)) 
 
@@ -197,6 +205,9 @@ import           Data.Parameterized.SetF (SetF)
 import qualified Data.Parameterized.SetF as SetF
 import GHC.Stack (HasCallStack)
 import Control.Monad.Reader
+import qualified Data.Parameterized.Context as Ctx
+import qualified What4.Expr.Builder as W4B
+import qualified What4.Concrete as W4
 
 
 -- | Gas is used to ensure that our fixpoint computation terminates
@@ -312,7 +323,7 @@ data PairGraph sym arch =
     -- | Mapping from singleton nodes to their "synchronization" point, representing
     --   the case where two independent program analysis steps have occurred and now
     --   their control-flows have re-synchronized
-  , pairGraphSyncData :: !(Map (GraphNode arch) (SyncData arch))
+  , pairGraphSyncData :: !(Map (GraphNode arch) (SyncData sym arch))
   , pairGraphPendingActs :: ActionQueue sym arch
   , pairGraphDomainRefinements ::
       !(Map (GraphNode arch) [DomainRefinement sym arch])
@@ -422,7 +433,7 @@ data PropagateKind =
 -- of Original sync point vs. every Patched sync point
 -- In practice this is still reasonably small, since there are usually
 -- only 2-3 cut addresses on each side (i.e. 4-9 merge cases to consider)
-data SyncData arch =
+data SyncData sym arch =
   SyncData
     { 
       -- | During single-sided analysis, if we encounter an edge
@@ -439,11 +450,25 @@ data SyncData arch =
     , _syncExceptions :: PPa.PatchPair (SetF (TupleF '(SingleNodeEntry arch, PB.BlockTarget arch)))
       -- Exits from the corresponding desync node that start the single-sided analysis
     , _syncDesyncExits :: PPa.PatchPair (SetF (PB.BlockTarget arch))
+      -- | A special-purpose assertion that provides bindings for uninterpreted functions
+      --   representing the semantics of the other side of the analysis at any given sync point.
+      --   These are created when propagating assertions from sync points back to each single-sided analysis.
+      --   They are propagated backwards through the single-sided analysis until reaching the divergence point,
+      --   where they are ultimately discharged by rewriting the uninterpreted functions according to the
+      --   collected bindings.
+    , _syncBindings :: MapF (SingleNodeEntry arch) (PFn.FnBindingsSpec sym arch)
+      -- | When a sync point has an assertion that needs to be propagated through the single-sided analysis,
+      --   it generates a set of uninterpreted functions (implicitly scoped to the program state at the divergence point),
+      --   that represent the single-sided program state at exactly that sync point.
+      --   The domain should always be a subset of the sync points.
+    , _syncStates :: MapF (SingleNodeEntry arch) (PS.SimState sym arch PS.GlobalScope)
     }
+
+
 
 -- sync exit point should *always* point to a cut address
 data SyncPoint arch bin =
-    SyncAtExit { syncPointNode :: SingleNodeEntry arch bin , _syncPointExit :: SingleNodeEntry arch bin }
+    SyncAtExit { syncPointNode :: SingleNodeEntry arch bin , _syncPointExit :: SingleNodeEntry arch bin}
   | SyncAtStart { syncPointNode :: SingleNodeEntry arch bin }
   deriving (Eq, Ord, Show)
 
@@ -457,74 +482,151 @@ instance OrdF (SyncPoint arch) where
   compareF sp1 sp2 = lexCompareF (syncPointBin sp1) (syncPointBin sp2) $
     fromOrdering (compare sp1 sp2)
 
-instance Semigroup (SyncData arch) where
-  (SyncData a1 b1 c1 d1) <> (SyncData a2 b2 c2 d2) = (SyncData (a1 <> a2) (b1 <> b2) (c1 <> c2) (d1 <> d2))
-
-
-instance Monoid (SyncData arch) where
-  mempty = SyncData 
+emptySyncData :: SyncData sym arch
+emptySyncData = SyncData 
     (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
     (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
     (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty) 
     (PPa.mkPair PBi.OriginalRepr SetF.empty SetF.empty)
+    MapF.empty
+    MapF.empty
+
+
 
 $(L.makeLenses ''SyncData)
 $(L.makeLenses ''ActionQueue)
 
 type ActionQueueLens sym arch k v = L.Lens' (ActionQueue sym arch) (Map k [PendingAction sym arch v])
 
+-- lifting 'PairGraph' lenses into the monad
+getPG ::
+  L.Lens' (PairGraph sym arch) k ->
+  PairGraphM sym arch k
+getPG lens = (\pg -> pg ^. lens) <$> get
+
+setPG ::
+  (k -> k) ->
+  L.Lens' (PairGraph sym arch) k ->
+  PairGraphM sym arch ()
+setPG f lens = modify $ \pg -> pg & lens %~ f
+
 getSyncData ::
   forall sym arch x bin.
   HasCallStack =>
   (OrdF x, Ord (x bin)) =>
-  L.Lens' (SyncData arch) (PPa.PatchPair (SetF x)) ->
+  L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
   PBi.WhichBinaryRepr bin ->
   GraphNode arch {- ^ The divergent node -}  ->
   PairGraphM sym arch (Set (x bin))
-getSyncData lens bin nd = do
-  sp <- lookupPairGraph @sym pairGraphSyncData nd
-  let x = sp ^. lens
-  -- should be redundant, but no harm in checking
-  case PPa.get bin x of
-    Just x' -> return $ SetF.toSet x'
-    Nothing -> return Set.empty
+getSyncData lens bin nd = getPG $ syncDataSet nd bin lens
 
 getSingleNodeData ::
   forall sym arch x bin.
   HasCallStack =>
   (OrdF x, Ord (x bin)) =>
-  L.Lens' (SyncData arch) (PPa.PatchPair (SetF x)) ->
+  L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
   SingleNodeEntry arch bin ->
   PairGraphM sym arch (Set (x bin))
-getSingleNodeData lens sne = do
-  let dp = singleNodeDivergePoint sne 
-  let bin = singleEntryBin sne
-  getSyncData lens bin dp
+getSingleNodeData lens sne =
+  getPG $ syncDataSet (singleNodeDivergePoint sne) (singleEntryBin sne) lens
+
+addFnBindings ::
+  sym ~ W4B.ExprBuilder s st fs =>
+  PA.ValidArch arch =>
+  sym ->
+  PS.SimScope sym arch v ->
+  SingleNodeEntry arch bin ->
+  PFn.FnBindings sym bin v ->
+  PairGraph sym arch ->
+  IO (PFn.FnBindings sym bin v, PairGraph sym arch)
+addFnBindings sym scope sne binds pg = case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+  Just (PS.AbsT bindsSpec_prev) -> do
+    binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
+    -- FIXME: check for clashes?
+    true_ <- PS.concreteScope sym (W4.ConcreteBool True)
+    binds' <- PFn.merge sym true_ binds binds_prev
+    return $ (binds', pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds'))
+  Nothing -> return $ (binds, pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds))
+  where
+    dp = singleNodeDivergence sne
+
+
+-- | Retrieve the final state that binds the given scope to instead be
+--   "globally" scoped (i.e. scoped to the variables at the point of divergence).
+--   This is used to represent the uninterpreted transition for the other side of
+--   the analysis when going from single-sided to two-sided.
+initFnBindings ::
+  forall sym arch s st fs v bin.
+  sym ~ W4B.ExprBuilder s st fs =>
+  PA.ValidArch arch =>
+  sym ->
+  PS.SimScope sym arch v ->
+  SingleNodeEntry arch bin ->
+  PairGraph sym arch ->
+  IO ((PS.SimState sym arch PS.GlobalScope bin, PFn.FnBindings sym bin v), PairGraph sym arch)
+initFnBindings sym scope sne pg = do
+  case MapF.lookup sne (pg ^. (syncData dp . syncStates)) of
+    -- if we already have a 'syncState' entry, then we should re-use those
+    -- uninterpreted functions rather than making new ones
+    Just st_global -> case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+      Just (PS.AbsT bindsSpec_prev) -> do
+        binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
+        return ((st_global, binds_prev), pg)
+      Nothing -> fail $ "Missing binding information for node: " ++ show sne
+    Nothing -> do
+      (PS.PopT st_global, binds) <- PFn.init sym (PS.PopT st)
+      let pg' = pg & (syncData dp . syncStates) %~ MapF.insert sne st_global
+      (binds', pg'') <- addFnBindings sym scope sne binds pg'
+      return $ ((st_global, binds'), pg'')
+  where
+    dp = singleNodeDivergence sne
+    bin = singleEntryBin sne
+
+    st :: PS.SimState sym arch v bin
+    st = PS.simVarState $ case bin of
+      PBi.OriginalRepr -> fst (PS.scopeVarsPair scope)
+      PBi.PatchedRepr -> snd (PS.scopeVarsPair scope)
+
+syncData ::
+  forall sym arch.
+  GraphNode arch ->
+  L.Lens' (PairGraph sym arch) (SyncData sym arch)
+syncData nd f pg = fmap set_ (f get_)
+    where
+      get_ :: SyncData sym arch
+      get_ = case Map.lookup nd (pairGraphSyncData pg) of
+        Just sd -> sd
+        Nothing -> emptySyncData
+
+      set_ :: SyncData sym arch -> PairGraph sym arch
+      set_ sd = pg { pairGraphSyncData = Map.insert nd sd (pairGraphSyncData pg) }
+
+syncDataSet ::
+  forall k sym arch bin.
+  (OrdF k, Ord (k bin)) =>
+  GraphNode arch ->
+  PBi.WhichBinaryRepr bin ->
+  L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF k)) ->
+  L.Lens' (PairGraph sym arch) (Set (k bin))
+syncDataSet nd bin lens = (syncData nd . lens . PPa.lens bin SetF.empty . SetF.asSet)
+
 
 modifySyncData ::
   forall sym arch x bin.
   HasCallStack =>
   (OrdF x, Ord (x bin)) =>
-  L.Lens' (SyncData arch) (PPa.PatchPair (SetF x)) ->
+  L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
   PBi.WhichBinaryRepr bin ->
   GraphNode arch -> 
   (Set (x bin) -> Set (x bin)) ->
   PairGraphM sym arch ()
-modifySyncData lens bin dp f = do
-  msp <- tryPG $ lookupPairGraph pairGraphSyncData dp
-  let f' = \x -> SetF.fromSet (f (SetF.toSet x))
-  let sp' = case msp of
-        Nothing -> mempty & lens .~ (PPa.mkSingle bin (f' SetF.empty))
-        Just sp -> sp & lens %~ 
-          (\x -> PPa.set bin (f' $ fromMaybe SetF.empty (PPa.get bin x)) x)
-  modify $ \pg -> 
-    pg { pairGraphSyncData = Map.insert dp sp' (pairGraphSyncData pg)}
+modifySyncData lens bin dp f = setPG f $ syncDataSet dp bin lens
 
 addToSyncData ::
   forall sym arch x bin.
   (OrdF x, Ord (x bin)) =>
   HasCallStack =>
-  L.Lens' (SyncData arch) (PPa.PatchPair (SetF x)) ->
+  L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
   PBi.WhichBinaryRepr bin ->
   GraphNode arch {- ^ The divergent node -}  ->
   x bin ->
