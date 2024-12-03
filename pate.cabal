@@ -94,6 +94,8 @@ library
   exposed-modules:     Data.Macaw.CFGSlice,
                        Data.RevMap,
                        Data.UnwrapType,
+                       Data.Parameterized.TotalMapF,
+                       Data.Quant,
                        Pate.Abort,
                        Pate.Address,
                        Pate.AssumptionSet,

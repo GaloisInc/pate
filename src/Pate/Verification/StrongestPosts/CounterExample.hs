@@ -289,7 +289,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceF
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (TraceEvents sym arch) where
   w4Serialize (TraceEvents p pre post) = do
-    trace_pair <- PPa.w4SerializePair p $ \(TraceEventsOne rop evs) -> 
+    trace_pair <- PB.w4SerializePair p $ \(TraceEventsOne rop evs) -> 
       W4S.object [ "initial_regs" .= rop, "events" .= evs]
     W4S.object [ "precondition" .= pre, "postcondition" .= post, "traces" .= trace_pair ]
 

@@ -406,6 +406,6 @@ instance (LocationTraversable sym arch a, LocationTraversable sym arch b) =>
 
 instance (forall bin. (LocationWitherable sym arch (f bin))) =>
   LocationWitherable sym arch (PPa.PatchPair f) where
-  witherLocation sym pp f = TF.traverseF (\x -> witherLocation sym x f) pp
+  witherLocation sym pp f = PPa.traverse (\x -> witherLocation sym x f) pp
 
 
