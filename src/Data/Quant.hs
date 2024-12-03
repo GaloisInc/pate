@@ -46,6 +46,10 @@ module Data.Quant
     , type OneK
     , type ExistsK
     , type AllK
+    , map
+    , traverse
+    , mapWithRepr
+    , traverseWithRepr
     , pattern QuantSome
     , toQuantExists
     , quantToRepr
@@ -56,9 +60,12 @@ module Data.Quant
     , pattern QuantToOne
     , generateAll
     , generateAllM
-    , pattern QuantAsAll
-    , pattern QuantAsOne
+    , pattern All
+    , pattern Single
+    , viewQuantEach
   ) where
+
+import           Prelude hiding (map, traverse)
 
 import           Data.Kind (Type)
 import           Data.Constraint
@@ -156,8 +163,23 @@ instance forall k. HasReprK k => TraversableFC (Quant :: (k -> Type) -> QuantK k
         QuantAll g -> QuantAll <$> traverseF f g
         QuantSome x -> QuantSome <$> traverseFC f x
 
+map :: (forall x. f x -> g x) -> Quant f tp -> Quant g tp
+map = fmapFC
 
+mapWithRepr :: (forall (x :: k). ReprOf x -> f x -> g x) -> Quant f tp -> Quant g tp
+mapWithRepr f = \case
+    QuantOne repr x -> QuantOne repr $ f repr x
+    QuantAll tm -> QuantAll $ TMF.mapWithKey f tm
+    QuantSome x -> QuantSome $ mapWithRepr f x
 
+traverse :: (HasReprK k, Applicative m) => (forall (x :: k). f x -> m (g x)) -> Quant f tp -> m (Quant g tp)
+traverse = traverseFC
+
+traverseWithRepr :: (HasReprK k, Applicative m) => (forall (x :: k). ReprOf x -> f x -> m (g x)) -> Quant f tp -> m (Quant g tp)
+traverseWithRepr f = \case
+    QuantOne repr x -> QuantOne <$> pure repr <*> f repr x
+    QuantAll tm -> QuantAll <$> TMF.traverseWithKey f tm
+    QuantSome x -> QuantSome <$> traverseWithRepr f x
 
 quantToRepr :: Quant f tp -> QuantRepr tp
 quantToRepr = \case
@@ -303,10 +325,6 @@ instance HasReprK k => ToMaybeQuant (Quant f) (tp1 :: QuantK k) (tp2 :: QuantK k
         -- good reason
 
 
-data AsOneK (f :: QuantK k -> Type) (y :: k) where
-    AsOneK :: f (OneK y) -> AsOneK f y
-
-
 class (Antecedent p c => c) => Implies p c where
     type Antecedent p c :: Constraint
 
@@ -341,13 +359,39 @@ pattern QuantToOne :: forall {k} x f tp. (KnownHasRepr (x :: k), HasReprK k) => 
 pattern QuantToOne fx <- (asQuantOne (knownRepr :: ReprOf x) -> Just (Dict, Dict, _, fx))
 
 
--- | Project a total function from a 'Quant' if it is universally quantified.
-pattern QuantAsAll :: forall {k} f tp. (HasReprK k) => () => (forall x. ReprOf x -> f x) -> Quant (f :: k -> Type) tp
-pattern QuantAsAll f <- ((\l -> (case toMaybeQuant l QuantAllRepr of Just (QuantAll f) -> Just (TMF.apply f); _ -> Nothing)  :: Maybe (forall (x :: k). ReprOf x -> f x) ) -> Just (f))
+class IsExistsOr (tp1 :: QuantK k) (tp2 :: QuantK k) where
+    isExistsOr :: Either (tp1 :~: ExistsK) (tp1 :~: tp2)
+
+instance IsExistsOr x x where
+    isExistsOr = Right Refl
+
+instance IsExistsOr ExistsK (OneK k) where
+    isExistsOr = Left Refl
+
+instance IsExistsOr ExistsK AllK where
+    isExistsOr = Left Refl
+
+data QuantAsAllProof (f :: k -> Type) (tp :: QuantK k) where
+    QuantAsAllProof :: (IsExistsOr tp AllK) => (forall x. ReprOf x -> f x) -> QuantAsAllProof f tp
+
+quantAsAll :: HasReprK k => Quant (f :: k -> Type) tp -> Maybe (QuantAsAllProof f tp)
+quantAsAll q = case q of
+    QuantOne{} -> Nothing
+    QuantAll f -> Just (QuantAsAllProof (TMF.apply f))
+    QuantSome q' -> case quantAsAll q' of
+        Just (QuantAsAllProof f) -> Just $ QuantAsAllProof f
+        Nothing -> Nothing
+
+-- | Pattern for creating or matching a universally quantified 'Quant', generalized over the existential cases
+pattern All :: forall {k} f tp. (HasReprK k) => (IsExistsOr tp AllK) => (forall x. ReprOf x -> f x) -> Quant (f :: k -> Type) tp
+pattern All f <- (quantAsAll -> Just (QuantAsAllProof f))
+    where
+        All f = case (isExistsOr :: Either (tp :~: ExistsK) (tp :~: AllK)) of
+            Left Refl -> QuantAny (All f)
+            Right Refl -> QuantAll (TMF.mapWithKey (\repr _ -> f repr) (allReprs @k))
 
 data QuantAsOneProof (f :: k -> Type) (tp :: QuantK k) where
-    QuantAsOneProof :: (KnownRepr QuantRepr tp, Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> QuantAsOneProof f tp
-
+    QuantAsOneProof :: (IsExistsOr tp (OneK (TheOneK tp)), Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> QuantAsOneProof f tp
 
 quantAsOne :: forall k f tp. HasReprK k => Quant (f :: k -> Type) (tp :: QuantK k) -> Maybe (QuantAsOneProof f tp)
 quantAsOne q = case q of
@@ -358,6 +402,46 @@ quantAsOne q = case q of
     _ -> Nothing
 
 
--- | Project out the element of a singleton 'Quant'
-pattern QuantAsOne :: forall {k} f tp. (HasReprK k) => forall x. (KnownRepr QuantRepr tp, Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
-pattern QuantAsOne repr x <- (quantAsOne -> Just (QuantAsOneProof repr x))
+-- | Pattern for creating or matching a singleton 'Quant', generalized over the existential cases
+pattern Single :: forall {k} f tp. (HasReprK k) => forall x. (IsExistsOr tp (OneK (TheOneK tp)), Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
+pattern Single repr x <- (quantAsOne -> Just (QuantAsOneProof repr x))
+    where
+        Single repr x = case (isExistsOr :: Either (tp :~: ExistsK) (tp :~: (OneK (TheOneK tp)))) of
+            Left Refl -> QuantExists (Single repr x)
+            Right Refl -> QuantOne repr x
+
+{-# COMPLETE Single, All #-}
+{-# COMPLETE Single, QuantAll, QuantAny #-}
+{-# COMPLETE Single, QuantAll, QuantSome #-}
+
+{-# COMPLETE All, QuantOne, QuantExists #-}
+{-# COMPLETE All, QuantOne, QuantSome #-}
+
+newtype AsOneK (f :: QuantK k -> Type) (y :: k) where
+    AsOneK :: f (OneK y) -> AsOneK f y
+
+deriving instance Eq (f (OneK x)) => Eq ((AsOneK f) x)
+deriving instance Ord (f (OneK x)) => Ord ((AsOneK f) x)
+deriving instance Show (f (OneK x)) => Show ((AsOneK f) x)
+
+instance TestEquality f => TestEquality (AsOneK f) where
+    testEquality (AsOneK x) (AsOneK y) = case testEquality x y of
+        Just Refl -> Just Refl
+        Nothing -> Nothing
+
+instance OrdF f => OrdF (AsOneK f) where
+    compareF (AsOneK x) (AsOneK y) = case compareF x y of
+        EQF -> EQF
+        LTF -> LTF
+        GTF -> GTF
+
+instance forall f. ShowF f => ShowF (AsOneK f) where
+    showF (AsOneK x) = showF x
+    withShow _ (_ :: q tp) f = withShow (Proxy :: Proxy f) (Proxy :: Proxy (OneK tp)) f
+
+type QuantEach (f :: QuantK k -> Type) = Quant (AsOneK f) AllK
+
+viewQuantEach :: HasReprK k => QuantEach f -> (forall (x :: k). ReprOf x -> f (OneK x))
+viewQuantEach (QuantAll f) = \r -> case TMF.apply f r of AsOneK x -> x
+
+
