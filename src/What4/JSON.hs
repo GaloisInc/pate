@@ -372,6 +372,22 @@ class W4Deserializable sym a where
 w4Deserialize :: W4Deserializable sym a => JSON.Value -> W4DS sym a
 w4Deserialize v = ask >>= \W4DSEnv{} -> w4Deserialize_ v
 
+withSym :: (W4.IsExprBuilder sym => sym -> W4DS sym a) -> W4DS sym a
+withSym f = do
+  W4DSEnv{} <- ask
+  sym <- asks w4dsSym
+  f sym
+
+lookupIdent :: Integer -> W4DS sym (Some (W4.SymExpr sym))
+lookupIdent ident = withSym $ \_sym -> do
+  ExprEnv env <- asks w4dsEnv
+  case Map.lookup ident env of
+    Just (Some e) -> return $ Some e
+    Nothing -> fail $ "lookupIdent: Missing identifier '" 
+      ++ show ident 
+      ++ "' from environment:\n"
+      ++ show (map (\(i, Some e) -> (i, W4.printSymExpr e)) $ Map.toList env)
+
 instance W4Deserializable sym JSON.Value
 instance W4Deserializable sym String
 instance W4Deserializable sym Integer
@@ -436,9 +452,8 @@ instance W4Deserializable sym (Some (ToDeserializable sym)) where
     <|> do
       JSON.Object o <- return v
       (ident :: Integer) <- o .: "symbolic_ident"
-      ExprEnv env <- asks w4dsEnv
-      Just (Some e) <- return $ Map.lookup ident env
-      return $ Some e
+      lookupIdent ident
+
 
 instance forall tp sym. KnownRepr W4.BaseTypeRepr tp => W4Deserializable sym (ToDeserializable sym tp) where
   w4Deserialize_ v = do

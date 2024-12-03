@@ -18,7 +18,8 @@
 {-# LANGUAGE FlexibleInstances #-}
 
 module Pate.Verification.PairGraph.Node (
-    GraphNode(..)
+    GraphNode
+  , GraphNode'(..)
   , NodeEntry
   , NodeReturn
   , CallingContext
@@ -67,6 +68,9 @@ import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
 import qualified Data.Aeson as JSON
 import qualified Compat.Aeson as HMS
 
+import qualified Data.Quant as Qu
+import           Data.Quant ( Quant(..), QuantK, ExistsK )
+
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
 import qualified Pate.PatchPair as PPa
@@ -90,63 +94,68 @@ import qualified Pate.Address as PAd
 --   domain is propagated to all the potential return sites for
 --   that function, which are recorded separately in the
 --   "return vectors" map.
-data GraphNode arch
-  = GraphNode (NodeEntry arch)
-  | ReturnNode (NodeReturn arch)
+data GraphNode' arch (bin :: QuantK PB.WhichBinary)
+  = GraphNode (NodeEntry' arch bin)
+  | ReturnNode (NodeReturn' arch bin)
  deriving (Eq, Ord)
 
-instance PA.ValidArch arch => JSON.ToJSON (GraphNode arch) where
+type GraphNode arch = GraphNode' arch ExistsK
+
+instance PA.ValidArch arch => JSON.ToJSON (GraphNode' arch bin) where
   toJSON = \case
     GraphNode nd -> JSON.object [ ("graph_node_type", "entry"), "entry_body" JSON..= nd]
     ReturnNode nd -> JSON.object [ ("graph_node_type", "return"), "return_body" JSON..= nd]
 
-instance PA.ValidArch arch => W4S.W4Serializable sym (GraphNode arch) where
+instance PA.ValidArch arch => W4S.W4Serializable sym (GraphNode' arch bin) where
   w4Serialize r = return $ JSON.toJSON r
 
-instance PA.ValidArch arch => W4S.W4Serializable sym (NodeEntry arch) where
+instance PA.ValidArch arch => W4S.W4Serializable sym (NodeEntry' arch bin) where
   w4Serialize r = return $ JSON.toJSON r
 
 data NodeContent arch e = 
   NodeContent { nodeContentCtx :: CallingContext arch, nodeContent :: e }
   deriving (Eq, Ord)
 
-type NodeEntry arch = NodeContent arch (PB.BlockPair arch)
+type NodeEntry' arch (bin :: QuantK PB.WhichBinary) = NodeContent arch (Quant (PB.ConcreteBlock arch) bin)
+type NodeEntry arch = NodeEntry' arch ExistsK
 
-pattern NodeEntry :: CallingContext arch -> PB.BlockPair arch -> NodeEntry arch
+
+pattern NodeEntry :: CallingContext arch -> Quant (PB.ConcreteBlock arch) bin -> NodeEntry' arch bin
 pattern NodeEntry ctx bp = NodeContent ctx bp
 {-# COMPLETE NodeEntry #-}
 
 
-nodeBlocks :: NodeEntry arch -> PB.BlockPair arch
+nodeBlocks :: NodeEntry' arch bin -> Quant (PB.ConcreteBlock arch) bin
 nodeBlocks = nodeContent
 
-graphNodeContext :: NodeEntry arch -> CallingContext arch
+graphNodeContext :: NodeEntry' arch bin -> CallingContext arch
 graphNodeContext = nodeContentCtx
 
-type NodeReturn arch = NodeContent arch (PB.FunPair arch)
+type NodeReturn' arch bin = NodeContent arch (Quant (PB.FunctionEntry arch) bin)
+type NodeReturn arch = NodeReturn' arch ExistsK
 
-nodeFuns :: NodeReturn arch -> PB.FunPair arch
+nodeFuns :: NodeReturn' arch bin -> Quant (PB.FunctionEntry arch) bin
 nodeFuns = nodeContent
 
-returnNodeContext :: NodeReturn arch -> CallingContext arch
+returnNodeContext :: NodeReturn' arch bin -> CallingContext arch
 returnNodeContext = nodeContentCtx
 
-pattern NodeReturn :: CallingContext arch -> PB.FunPair arch -> NodeReturn arch
+pattern NodeReturn :: CallingContext arch -> Quant (PB.FunctionEntry arch) bin -> NodeReturn' arch bin
 pattern NodeReturn ctx bp = NodeContent ctx bp
 {-# COMPLETE NodeReturn #-}
 
-graphNodeBlocks :: GraphNode arch -> PB.BlockPair arch
+graphNodeBlocks :: GraphNode' arch bin -> Quant (PB.ConcreteBlock arch) bin
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
-graphNodeBlocks (ReturnNode ret) = PPa.map PB.functionEntryToConcreteBlock (nodeFuns ret)
+graphNodeBlocks (ReturnNode ret) = Qu.map PB.functionEntryToConcreteBlock (nodeFuns ret)
 
 nodeContext :: GraphNode arch -> CallingContext arch
 nodeContext (GraphNode nd) = nodeContentCtx nd
 nodeContext (ReturnNode ret) = nodeContentCtx ret
 
-pattern GraphNodeEntry :: PB.BlockPair arch -> GraphNode arch
+pattern GraphNodeEntry :: Quant (PB.ConcreteBlock arch) bin -> GraphNode' arch bin
 pattern GraphNodeEntry blks <- (GraphNode (NodeContent _ blks))
 
-pattern GraphNodeReturn :: PB.FunPair arch -> GraphNode arch
+pattern GraphNodeReturn :: Quant (PB.FunctionEntry arch) bin -> GraphNode' arch bin
 pattern GraphNodeReturn blks <- (ReturnNode (NodeContent _ blks))
 
 {-# COMPLETE GraphNodeEntry, GraphNodeReturn #-}
@@ -175,25 +184,28 @@ getDivergePoint nd = case nd of
   GraphNode (NodeEntry ctx _) -> divergePoint ctx
   ReturnNode (NodeReturn ctx _) -> divergePoint ctx
 
-rootEntry :: PB.BlockPair arch -> NodeEntry arch
+rootEntry :: PB.BinaryPair (PB.ConcreteBlock arch) qbin -> NodeEntry' arch qbin
 rootEntry pPair = NodeEntry (CallingContext [] Nothing) pPair
 
-rootReturn :: PB.FunPair arch -> NodeReturn arch
+rootReturn :: PB.BinaryPair (PB.FunctionEntry arch) qbin -> NodeReturn' arch qbin
 rootReturn pPair = NodeReturn (CallingContext [] Nothing) pPair
 
-addContext :: PB.BlockPair arch -> NodeEntry arch -> NodeEntry arch
-addContext newCtx ne@(NodeEntry (CallingContext ctx d) blks) = 
+addContext :: PB.BinaryPair (PB.ConcreteBlock arch) qbin1 -> NodeEntry' arch qbin2 -> NodeEntry' arch qbin2
+addContext newCtx' ne@(NodeEntry (CallingContext ctx d) blks) = 
   case elem newCtx ctx of
     -- avoid recursive loops
     True -> ne
     False -> NodeEntry (CallingContext (newCtx:ctx) d) blks
+    where
+      newCtx = Qu.QuantSome newCtx'
 
 -- Strip diverge points from two-sided nodes. This is used so that
 -- merged nodes (which are two-sided) can meaningfully retain their
 -- diverge point, but it will be stripped on any subsequent nodes.
-mkNextContext :: PPa.PatchPair a -> CallingContext arch -> CallingContext arch
-mkNextContext (PPa.PatchPair{}) cctx = dropDivergePoint cctx
-mkNextContext _ cctx = cctx
+mkNextContext :: Quant a (bin :: QuantK PB.WhichBinary) -> CallingContext arch -> CallingContext arch
+mkNextContext q cctx = case q of
+  Qu.All{} -> dropDivergePoint cctx
+  Qu.Single{} -> cctx
 
 dropDivergePoint :: CallingContext arch -> CallingContext arch
 dropDivergePoint  (CallingContext cctx _) = CallingContext cctx Nothing
@@ -294,30 +306,30 @@ splitGraphNode nd = do
   return (nodeO, nodeP)
 
 -- | Get the node corresponding to the entry point for the function
-returnToEntry :: NodeReturn arch -> NodeEntry arch
-returnToEntry (NodeReturn ctx fns) = NodeEntry (mkNextContext fns ctx) (PPa.map PB.functionEntryToConcreteBlock fns)
+returnToEntry :: NodeReturn' arch bin -> NodeEntry' arch bin
+returnToEntry (NodeReturn ctx fns) = NodeEntry (mkNextContext fns ctx) (Qu.map PB.functionEntryToConcreteBlock fns)
 
 -- | Get the return node that this entry would return to
-returnOfEntry :: NodeEntry arch -> NodeReturn arch
-returnOfEntry (NodeEntry ctx blks) = NodeReturn (mkNextContext blks ctx) (PPa.map PB.blockFunctionEntry blks)
+returnOfEntry :: NodeEntry' arch bin -> NodeReturn' arch bin
+returnOfEntry (NodeEntry ctx blks) = NodeReturn (mkNextContext blks ctx) (Qu.map PB.blockFunctionEntry blks)
 
 -- | For an intermediate entry point in a function, find the entry point
 --   corresponding to the function start
-functionEntryOf :: NodeEntry arch -> NodeEntry arch
-functionEntryOf (NodeEntry ctx blks) = NodeEntry (mkNextContext blks ctx) (PPa.map (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) blks)
+functionEntryOf :: NodeEntry' arch bin -> NodeEntry' arch bin
+functionEntryOf (NodeEntry ctx blks) = NodeEntry (mkNextContext blks ctx) (Qu.map (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) blks)
 
 instance PA.ValidArch arch => Show (CallingContext arch) where
   show c = show (pretty c)
 
-instance PA.ValidArch arch => Show (NodeEntry arch) where
+instance PA.ValidArch arch => Show (NodeEntry' arch bin) where
   show e = show (pretty e)
 
-instance PA.ValidArch arch => Pretty (NodeEntry arch) where
+instance PA.ValidArch arch => Pretty (NodeEntry' arch bin) where
   pretty e = case functionEntryOf e == e of
     True -> case graphNodeContext e of
       CallingContext [] _ -> pretty (nodeBlocks e)
       _ -> pretty (nodeBlocks e) <+> "[" <+> pretty (graphNodeContext e) <+> "]"
-    False -> PPa.ppPatchPair' PB.ppBlockAddr (nodeBlocks e)
+    False -> PB.ppBinaryPair' PB.ppBlockAddr (nodeBlocks e)
       <+> "[" <+> pretty (graphNodeContext (addContext (nodeBlocks (functionEntryOf e)) e)) <+> "]"
 
 instance PA.ValidArch arch => Pretty (NodeReturn arch) where
@@ -347,7 +359,7 @@ tracePrettyNode nd msg = case nd of
     "" -> "Return" <+> pretty ret
     _ -> "Return" <+> pretty ret <+> PP.parens (pretty msg)
 
-instance PA.ValidArch arch => JSON.ToJSON (NodeEntry arch) where
+instance PA.ValidArch arch => JSON.ToJSON (NodeEntry' arch bin) where
   toJSON e = JSON.object 
     [ "type" JSON..= entryType
     , "context" JSON..= graphNodeContext e 
@@ -359,7 +371,7 @@ instance PA.ValidArch arch => JSON.ToJSON (NodeEntry arch) where
           True ->  "function_entry"
           False -> "function_body"
   
-instance PA.ValidArch arch => JSON.ToJSON (NodeReturn arch) where
+instance PA.ValidArch arch => JSON.ToJSON (NodeReturn' arch bin) where
   toJSON e = JSON.object 
     [ "context" JSON..= returnNodeContext e
     , "functions" JSON..= nodeFuns e 
