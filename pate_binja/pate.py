@@ -351,14 +351,46 @@ class PateWrapper:
             print('\nJSON {}:'.format(path))
             pp.pprint(rec)
 
+        if path == [48] and this.startswith('segment1+0x4120 (original) vs. segment1+0x3dd44 (patched) [ via: "transport_handler" (segment1+0x400c) ]'):
+            pass
+
+        # Hack to extract proof obligations (same form as eq cond)
+        if len(path) == 2 and rec.get('node_kind') in {'condition_kind'}:
+            for i,tnc in enumerate(rec['trace_node_contents']):
+                content = tnc['content']
+                if content.get('node_kind') == 'message' and tnc.get('pretty') == 'Simplified Predicate':
+                    self._command(str(i))
+                    childrec = self.next_json()
+                    for ci, ctnc in enumerate(childrec['trace_node_contents']):
+                        ccontent = ctnc['content']
+                        if ctnc['pretty'] == 'Condition Traces':
+                            eqCond = ConditionTrace(ccontent)
+                            match this:
+                                case 'Asserted':
+                                    if cfar_parent.assertedConditionTrace:
+                                        cfar_parent.assertedConditionTrace.update(ccontent)
+                                    else:
+                                        cfar_parent.assertedConditionTrace = ConditionTrace(ccontent)
+                                case 'Equivalence Condition Assumed':
+                                    if cfar_parent.assumedConditionTrace:
+                                        cfar_parent.assumedConditionTrace.update(ccontent)
+                                    else:
+                                        cfar_parent.assumedConditionTrace = ConditionTrace(ccontent)
+
+                    self._command('up')
+                    # Consume result of up, but do not need it
+                    ignore = self.next_json()
+            # Don't go any deeper
+            return
+
         # Hack to find counter-example trace for exit. Really need to restructure this whole method.
         if (len(path) == 4
             and len(rec.get('trace_node_contents', [])) >= 3
             and rec['trace_node_contents'][1].get('pretty') == 'Equivalence Counter-example'
             ):
-            for c in rec['trace_node_contents']:
-                if c.get('content', {}).get('traces', {}):
-                    cfar_parent.addExitMetaData(cfar_exit, 'ce_event_trace', c['content'])
+            for tnc in rec['trace_node_contents']:
+                if tnc.get('content', {}).get('traces', {}):
+                    cfar_parent.addExitMetaData(cfar_exit, 'ce_event_trace', tnc['content'])
             # don't go any deeper
             return
 
@@ -388,9 +420,9 @@ class PateWrapper:
             cfar_parent.addExit(cfar_node)
 
             # Look for event trace on this exit
-            for c in  rec['trace_node_contents']:
-                if c.get('content') and c['content'].get('traces', {}):
-                    cfar_parent.addExitMetaData(cfar_exit, 'event_trace', c['content'])
+            for tnc in  rec['trace_node_contents']:
+                if tnc.get('content') and tnc['content'].get('traces', {}):
+                    cfar_parent.addExitMetaData(cfar_exit, 'event_trace', tnc['content'])
                     break
 
             # Look for observable difference trace for this node
@@ -451,7 +483,8 @@ class PateWrapper:
 
             # TODO: Ask Dan about this filter.
             if ((len(path) == 0 and child.get('trace_node_kind') in {'node'})
-                    or (len(path) == 1 and child.get('subtree_kind') == '"blocktarget"')
+                    or (len(path) == 1 and child.get('subtree_kind') in {'"blocktarget"'})
+                    or (len(path) == 1 and child.get('node_kind') in {'condition_kind'})
                     or (len(path) == 2 and child.get('trace_node_kind') in {'blocktarget'})
                     # Look for counter-example trace
                     or (len(path) == 3 and rec.get('trace_node_kind') == 'blocktarget'
@@ -548,7 +581,7 @@ class PateWrapper:
 
         return True
 
-    def processFinalResult(self, traceConstraints: list[tuple[TraceVar, str, str]] = None, cfarNode: CFARNode = None):
+    def processFinalResult(self, traceConstraints: Optional[list[tuple[TraceVar, str, str]]] = None, cfarNode: CFARNode = None):
         # TODO: add option to do with respect to a cfar node in which case missing should clear eq cond data?
         self._command('up')
         rec = self.next_json()
@@ -570,16 +603,19 @@ class PateWrapper:
                         eqcond = item['val']
 
                         node_id = get_graph_node_id(node)
-                        predicate = eqcond['predicate']
-                        trace_true = eqcond['trace_true']
-                        trace_false = eqcond['trace_false']
-                        trace_footprint = eqcond['trace_footprint']
+
+                        if self.last_cfar_graph:
+                            cfar_node = self.last_cfar_graph.get(node_id)
+                            if cfar_node.equivalenceConditionTrace:
+                                cfar_node.equivalenceConditionTrace.update(eqcond, traceConstraints)
+                            else:
+                                cfar_node.equivalenceConditionTrace = ConditionTrace(eqcond, traceConstraints)
 
                         # print('CFAR id:', node_id)
 
-                        out.write(f'Equivalence condition for {node_id}\n')
-                        pprint_symbolic(out, predicate)
-                        out.write('\n')
+                        # out.write(f'Equivalence condition for {node_id}\n')
+                        # pprint_symbolic(out, predicate)
+                        # out.write('\n')
 
                         # out.write('\nTrace True\n')
                         # pprint_node_event_trace(trace_true, 'True Trace', out=out)
@@ -587,23 +623,13 @@ class PateWrapper:
                         # out.write('\nTrace False\n')
                         # pprint_node_event_trace(trace_false, 'False Trace', out=out)
 
-                        if self.last_cfar_graph:
-                            cfar_node = self.last_cfar_graph.get(node_id)
-                            # Hack to get unconstrainedPredicate from first top level result
-                            if cfar_node.unconstrainedPredicate is None:
-                                cfar_node.unconstrainedPredicate = predicate
-                            cfar_node.predicate = predicate
-                            cfar_node.trace_true = trace_true
-                            cfar_node.trace_false = trace_false
-                            cfar_node.trace_footprint = trace_footprint
-                            cfar_node.traceConstraints = traceConstraints
-
                 else:
-                    # no eq conditions - unsat constraints
-                    cfarNode.trace_true = False
-                    cfarNode.trace_false = False
-                    cfarNode.traceConstraints = traceConstraints
-                    cfarNode.predicate = cfarNode.unconstrainedPredicate
+                    # Hack to handle case where constraints were unsatisfiable
+                    ect = cfarNode.equivalenceConditionTrace
+                    ect.trace_true = False
+                    ect.trace_false = False
+                    ect.traceConstraints = traceConstraints
+                    ect.predicate = ect.unconstrainedPredicate
 
             self.user.show_message(out.getvalue())
         if self.last_cfar_graph:
@@ -695,6 +721,25 @@ class PateWrapper:
             self.user.show_message(str(rec))
 
 
+class ConditionTrace:
+
+    def __init__(self, raw: dict, traceConstraints: Optional[list[tuple[TraceVar, str, str]]] = None):
+        self.unconstrainedPredicate = raw['predicate']
+        self.traceConstraints = traceConstraints
+        self.predicate = None
+        self.trace_true = None
+        self.trace_false = None
+        self.trace_footprint = None
+        self.update(raw)
+
+    def update(self, raw:dict, traceConstraints: Optional[list[tuple[TraceVar, str, str]]] = None):
+        self.traceConstraints = traceConstraints
+        self.predicate = raw['predicate']
+        self.trace_true = raw['trace_true']
+        self.trace_false = raw['trace_false']
+        self.trace_footprint = raw['trace_footprint']
+
+
 class TraceCollection:
 
     def __init__(self, desc: str, raw: dict):
@@ -760,15 +805,13 @@ class CFARNode:
         self.external_postdomain = None
         self.addr = None
         self.focus = False
-        self.unconstrainedPredicate = None
-        self.predicate = None
-        self.trace_true = None
-        self.trace_false = None
-        self.trace_footprint = None
         self.traceConstraints = None
         self.instruction_trees = None
         self.wideningInfo = None
         self.observableDiffTrace = None
+        self.equivalenceConditionTrace = None
+        self.assertedConditionTrace = None
+        self.assumedConditionTrace = None
 
         # After default initializations above, update the node
         self.update_node(desc, data)
@@ -865,7 +908,7 @@ class CFARGraph:
     def getEqCondNodes(self):
         nodes = []
         for n in self.nodes.values():
-            if n.predicate:
+            if n.equivalenceConditionTrace:
                 nodes.append(n)
         return nodes
 
@@ -1638,6 +1681,15 @@ def simplify_sexp(sexp, env=None):
     # Normal expression
     op = sexp[0]
     arg = list(map(lambda x: simplify_sexp(x, env), sexp[1:]))
+
+    # ('_', 'extract', s, e)(n) => n<s,e> 
+    if (isinstance(op, list) and len(op) == 4 and op[0] == '_' and op[1] == 'extract'
+            and len(arg) == 1 and isinstance(arg[0], str)):
+        return f'{arg[0]}<{op[2]}:{op[3]}>'
+
+    # If op is not a string, don't try to process it.
+    if not isinstance(op, str):
+        return sexp
 
     # Simplify call(F, args...) => F(args...)
     if op == 'call' and len(arg) >= 1:

@@ -481,17 +481,22 @@ class PateCfarExitDialog(QDialog):
 
 
 class PateCfarEqCondDialog(QDialog):
-    def __init__(self, cfarNode, parent=None):
+    def __init__(self, cfarNode,
+                 conditionTrace: pate.ConditionTrace,
+                 allowTraceConstraint=False,
+                 label: str = 'Condition',
+                 parent=None):
         super().__init__(parent)
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
         self.cfarNode = cfarNode
+        self.conditionTrace = conditionTrace
         self.traceConstraints = None
 
         self.resize(1500, 800)
 
         self.setWindowTitle("")
-        self.setWindowTitle(f'Equivalence Condition - {self.cfarNode.id}')
+        self.setWindowTitle(f'{label} - {self.cfarNode.id}')
 
         # Equivalence Condition Box
         self.eqCondField = QPlainTextEdit()
@@ -503,14 +508,15 @@ class PateCfarEqCondDialog(QDialog):
         eqCondBox = QWidget()
         eqCondBox.setLayout(eqCondBoxLayout)
 
-        # Constrain True Trace Button
+        # Constrain Trace Button
         if pw.pate_thread.pate_wrapper.trace_file is None:
             # Replay mode
-            trueTraceConstraintButton = QPushButton("Constrain Trace (replay)")
+            traceConstraintButton = QPushButton("Constrain Trace (replay)")
         else:
             # Live Mode
-            trueTraceConstraintButton = QPushButton("Constrain Trace")
-        trueTraceConstraintButton.clicked.connect(lambda _: self.showTrueTraceConstraintDialog())
+            traceConstraintButton = QPushButton("Constrain Trace")
+        traceConstraintButton.clicked.connect(lambda _: self.showTraceConstraintDialog())
+        traceConstraintButton.setEnabled(allowTraceConstraint)
 
         # True Trace Box
         self.trueTraceWidget = TraceWidget(self)
@@ -543,7 +549,7 @@ class PateCfarEqCondDialog(QDialog):
         # Main Layout
         main_layout = QVBoxLayout()
         main_layout.addWidget(mainSplitter)
-        main_layout.addWidget(trueTraceConstraintButton)
+        main_layout.addWidget(traceConstraintButton)
         self.setLayout(main_layout)
 
         self.updateFromCfarNode()
@@ -551,23 +557,22 @@ class PateCfarEqCondDialog(QDialog):
     def updateFromCfarNode(self):
         self.eqCondField.clear()
         with io.StringIO() as out:
-            pate.pprint_symbolic(out, self.cfarNode.unconstrainedPredicate)
+            pate.pprint_symbolic(out, self.conditionTrace.unconstrainedPredicate)
             out.write('\n')
             if self.cfarNode.traceConstraints:
-                #print(self.cfarNode.traceConstraints)
                 out.write('\nUser-supplied trace constraints:\n')
                 for tc in self.cfarNode.traceConstraints:
                     out.write(f'{tc[0].pretty} {tc[1]} {tc[2]}\n')
-                if self.cfarNode.trace_true or self.cfarNode.trace_false:
+                if self.conditionTrace.trace_true or self.conditionTrace.trace_false:
                     out.write('\nEffective equivalence condition after adding user-provided constraints::\n')
-                    pate.pprint_symbolic(out, self.cfarNode.predicate)
+                    pate.pprint_symbolic(out, self.conditionTrace.predicate)
             else:
                 out.write('\nNo user-supplied trace constraints.\n')
             self.eqCondField.appendPlainText(out.getvalue())
-        self.trueTraceWidget.setTrace(self.cfarNode.trace_true)
-        self.falseTraceWidget.setTrace(self.cfarNode.trace_false)
+        self.trueTraceWidget.setTrace(self.conditionTrace.trace_true)
+        self.falseTraceWidget.setTrace(self.conditionTrace.trace_false)
 
-    def showTrueTraceConstraintDialog(self):
+    def showTraceConstraintDialog(self):
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
         replayTraceConstraints = pw.pate_thread.pate_wrapper.getReplayTraceConstraints()
         if replayTraceConstraints is None:
@@ -595,7 +600,7 @@ class PateTraceConstraintDialog(QDialog):
 
         self.cfarNode = cfarNode
 
-        self.traceVars = pate.extractTraceVars(self.cfarNode.trace_footprint)
+        self.traceVars = pate.extractTraceVars(self.cfarNode.equivalenceConditionTrace.trace_footprint)
 
         # Prune TraceVars with no symbolic_ident
         self.traceVars = [tv for tv in self.traceVars if tv.symbolic_ident is not None]
@@ -1251,7 +1256,7 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 action.triggered.connect(lambda _: self.pate_widget.gotoPatchedAddress(cfarNode.patched_addr))
                 menu.addAction(action)
 
-            if cfarNode.unconstrainedPredicate:
+            if cfarNode.equivalenceConditionTrace:
                 action = QAction('Show Equivalence Condition', self)
                 action.triggered.connect(lambda _: self.showCfarEqCondDialog(cfarNode))
                 menu.addAction(action)
@@ -1272,11 +1277,29 @@ class MyFlowGraphWidget(FlowGraphWidget):
                 action.triggered.connect(lambda _: self.showObservableDiffTrace(cfarNode, 'Observable Diff Trace'))
                 menu.addAction(action)
 
+            if cfarNode.assertedConditionTrace:
+                action = QAction(f'Show Asserted Condition', self)
+                action.triggered.connect(lambda _: self.showCondition(cfarNode, cfarNode.assertedConditionTrace, 'Asserted Condition'))
+                menu.addAction(action)
+
+            if cfarNode.assumedConditionTrace:
+                action = QAction(f'Show Assumed Condition', self)
+                action.triggered.connect(lambda _: self.showCondition(cfarNode, cfarNode.assumedConditionTrace, 'Assumed Condition'))
+                menu.addAction(action)
+
             if menu.actions():
                 menu.exec_(event.globalPos())
 
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
-        d = PateCfarEqCondDialog(cfarNode, parent=self)
+        d = PateCfarEqCondDialog(cfarNode,
+                                 cfarNode.equivalenceConditionTrace,
+                                 allowTraceConstraint=True,
+                                 label='Equivalence Condition',
+                                 parent=self)
+        d.show()
+
+    def showCondition(self, cfarNode: pate.CFARNode, conditionTrace: pate.ConditionTrace, label: str):
+        d = PateCfarEqCondDialog(cfarNode, conditionTrace, label=label, parent=self)
         d.show()
 
     def showWideningInfoDialog(self, cfarNode: pate.CFARNode):
