@@ -60,6 +60,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Parameterized.Nonce
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Quant as Qu
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -761,7 +762,7 @@ withWorkItem gr0 f = do
       let nd = workItemNode wi
       res <- subTraceLabel @"node" (printPriorityKind priority) nd $ atPriority priority Nothing $ do
         (mnext, gr2) <- case wi of
-          ProcessNode (GraphNode ne) | Just (Some sne) <- asSingleNodeEntry ne -> do
+          ProcessNode (GraphNode ne) | Just (Some (Qu.AsSingle sne)) <- asSingleNodeEntry ne -> do
             (evalPG gr1 $ isSyncNode sne) >>= \case
               True -> do
                 gr2 <- execPG gr1 $ queueExitMerges (\pk -> mkPriority pk priority) (SyncAtStart sne)
