@@ -325,27 +325,15 @@ instance HasReprK k => ToMaybeQuant (Quant f) (tp1 :: QuantK k) (tp2 :: QuantK k
         -- their type parameters (i.e nested Quants), but this level of generalization seems excessive without
         -- good reason
 
+type family TheOneK (tp :: QuantK k) :: k where
+    TheOneK (OneK k) = k
 
-class (Antecedent p c => c) => Implies (p :: Constraint) (c :: Constraint) where
-    type Antecedent p c :: Constraint
+type family IfIsOneK (tp :: QuantK k) (c :: Constraint) :: Constraint where
+    IfIsOneK (OneK k) c = c
+    IfIsOneK AllK c = ()
+    IfIsOneK ExistsK c = ()
 
-instance Implies (IsOneK AllK) c where
-    type Antecedent (IsOneK AllK) c = c
-
-instance Implies (IsOneK ExistsK) c where
-    type Antecedent (IsOneK ExistsK) c = c
-
-instance c => Implies (IsOneK (OneK k)) c where
-    type Antecedent (IsOneK (OneK k)) c = IsOneK (OneK k)
-
-class (tp ~ (OneK (TheOneK tp))) => IsOneK tp where
-    type TheOneK tp :: k
-
-instance IsOneK (OneK k) where
-    type TheOneK (OneK k) = k
-
-
-asQuantOne :: forall k (x :: k) f tp. HasReprK k => ReprOf x -> Quant (f :: k -> Type) (tp :: QuantK k) -> Maybe (Dict (KnownRepr QuantRepr tp), Dict (Implies (IsOneK tp) (x ~ TheOneK tp)), ReprOf x, f x)
+asQuantOne :: forall k (x :: k) f tp. HasReprK k => ReprOf x -> Quant (f :: k -> Type) (tp :: QuantK k) -> Maybe (Dict (KnownRepr QuantRepr tp), Dict (IfIsOneK tp (x ~ TheOneK tp)), ReprOf x, f x)
 asQuantOne repr = \case
     QuantOne repr' f | Just Refl <- testEquality repr' repr -> Just (withRepr (QuantOneRepr repr') $ Dict, Dict, repr, f)
     QuantOne{} -> Nothing
@@ -356,7 +344,7 @@ asQuantOne repr = \case
     QuantAny (QuantAll f) -> Just (Dict, Dict, repr, TMF.apply f repr)
 
 -- | Cast a 'Quant' to a specific instance of 'x' if it contains it. Pattern match failure otherwise.
-pattern QuantToOne :: forall {k} x f tp. (KnownHasRepr (x :: k), HasReprK k) => ( KnownRepr QuantRepr tp, Implies (IsOneK tp) (x ~ TheOneK tp)) => f x -> Quant f tp
+pattern QuantToOne :: forall {k} x f tp. (KnownHasRepr (x :: k), HasReprK k) => ( KnownRepr QuantRepr tp, IfIsOneK tp (x ~ TheOneK tp)) => f x -> Quant f tp
 pattern QuantToOne fx <- (asQuantOne (knownRepr :: ReprOf x) -> Just (Dict, Dict, _, fx))
 
 
@@ -369,26 +357,25 @@ type family IsExistsOrConstraint (tp1 :: QuantK k) (tp2 :: QuantK k) :: Constrai
 class IsExistsOrConstraint tp1 tp2 => IsExistsOr (tp1 :: QuantK k) (tp2 :: QuantK k) where
     isExistsOr :: ExistsOrCases tp1 tp2
     
-type instance IsExistsOrConstraint x x = ()
+type instance IsExistsOrConstraint (OneK x) tp = ((OneK x) ~ tp)
+type instance IsExistsOrConstraint (AllK :: QuantK k) tp = ((AllK :: QuantK k) ~ tp)
 
-instance IsExistsOr x x where
+instance IsExistsOr (OneK x) (OneK x) where
     isExistsOr = ExistsOrRefl
 
-type instance IsExistsOrConstraint ExistsK (OneK k) = ()
+instance IsExistsOr AllK AllK where
+    isExistsOr = ExistsOrRefl
+
+instance IsExistsOr ExistsK ExistsK where
+    isExistsOr = ExistsOrRefl
+
+type instance IsExistsOrConstraint ExistsK x = ()
 
 instance IsExistsOr ExistsK (OneK k) where
     isExistsOr = ExistsOrExists
 
-type instance IsExistsOrConstraint ExistsK AllK = ()
-
 instance IsExistsOr ExistsK AllK where
     isExistsOr = ExistsOrExists
-
--- Impossible cases
-type instance IsExistsOrConstraint (AllK :: QuantK k) ExistsK = (AllK :: QuantK k) ~ ExistsK
-type instance IsExistsOrConstraint (OneK k) ExistsK = (OneK k) ~ ExistsK
-type instance IsExistsOrConstraint (OneK x) AllK = (OneK x) ~ AllK
-type instance IsExistsOrConstraint AllK (OneK x) = AllK ~ (OneK x)
 
 data QuantAsAllProof (f :: k -> Type) (tp :: QuantK k) where
     QuantAsAllProof :: (IsExistsOr tp AllK) => (forall x. ReprOf x -> f x) -> QuantAsAllProof f tp
@@ -410,7 +397,7 @@ pattern All f <- (quantAsAll -> Just (QuantAsAllProof f))
             ExistsOrRefl -> QuantAll (TMF.mapWithKey (\repr _ -> f repr) (allReprs @k))
 
 data QuantAsOneProof (f :: k -> Type) (tp :: QuantK k) where
-    QuantAsOneProof :: (IsExistsOr tp (OneK (TheOneK tp)), Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> QuantAsOneProof f tp
+    QuantAsOneProof :: (IsExistsOr tp (OneK x), IfIsOneK tp (x ~ TheOneK tp)) => ReprOf x -> f x -> QuantAsOneProof f tp
 
 quantAsOne :: forall k f tp. HasReprK k => Quant (f :: k -> Type) (tp :: QuantK k) -> Maybe (QuantAsOneProof f tp)
 quantAsOne q = case q of
@@ -426,10 +413,10 @@ existsOrCases f g = case (isExistsOr :: ExistsOrCases tp tp') of
     ExistsOrRefl -> g
 
 -- | Pattern for creating or matching a singleton 'Quant', generalized over the existential cases
-pattern Single :: forall {k} f tp. (HasReprK k) => forall x. (IsExistsOr tp (OneK (TheOneK tp)), Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
+pattern Single :: forall {k} f tp. (HasReprK k) => forall x. (IsExistsOr tp (OneK x), IfIsOneK tp (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
 pattern Single repr x <- (quantAsOne -> Just (QuantAsOneProof repr x))
     where
-        Single repr x = existsOrCases @tp @(OneK (TheOneK tp)) (QuantExists (Single repr x)) (QuantOne repr x)
+        Single (repr :: ReprOf x) x = existsOrCases @tp @(OneK x) (QuantExists (Single repr x)) (QuantOne repr x)
 
 
 {-# COMPLETE Single, All #-}
