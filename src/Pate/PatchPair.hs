@@ -17,9 +17,12 @@
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Pate.PatchPair (
     PatchPair
+  , traverse
+  , map
   , pattern PatchPair
   , pattern PatchPairSingle
   , pattern PatchPairOriginal
@@ -70,12 +73,10 @@ module Pate.PatchPair (
   , asSingleton
   , toSingleton
   , zip
-  , jsonPatchPair
-  , w4SerializePair
   , WithBin(..)
   ) where
 
-import           Prelude hiding (zip)
+import           Prelude hiding (zip, map, traverse)
 import           GHC.Stack (HasCallStack)
 import           Control.Monad.Trans (lift)
 import           Control.Monad.Trans.Maybe
@@ -88,6 +89,9 @@ import           Data.Functor.Const ( Const(..) )
 import qualified Data.Kind as DK
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Quant as Qu
+
 import qualified Prettyprinter as PP
 import qualified Data.Aeson as JSON
 import qualified Compat.Aeson as JSON
@@ -110,14 +114,25 @@ import           Control.Applicative ( (<|>) )
 --   "full" (i.e. containing values for both binaries). Singleton 'PatchPair' values are used
 --   to handle cases where the control flow between the binaries has diverged and the verifier
 --   needs to handle each one independently.
-data PatchPair (tp :: PB.WhichBinary -> DK.Type) = PatchPairCtor
-  { _pOriginal :: tp PB.Original
-  , _pPatched :: tp PB.Patched
-  }
-  | forall bin. PatchPairSingle (PB.WhichBinaryRepr bin) (tp bin)
+type PatchPair (tp :: PB.WhichBinary -> DK.Type) = Qu.Quant tp Qu.ExistsK 
+
+map :: (forall (bin :: PB.WhichBinary). f bin -> g bin) -> PatchPair f -> PatchPair g
+map = TFC.fmapFC
+
+traverse :: Applicative m => (forall (bin :: PB.WhichBinary). f bin -> m (g bin)) -> PatchPair f -> m (PatchPair g)
+traverse = TFC.traverseFC
 
 pattern PatchPair :: (tp PB.Original) -> (tp PB.Patched) -> PatchPair tp
-pattern PatchPair a b = PatchPairCtor a b
+pattern PatchPair a b <- ((\l -> case l of Qu.All f -> Just (f PB.OriginalRepr, f PB.PatchedRepr); _ -> Nothing) -> Just (a, b))
+  where
+     PatchPair a b = Qu.QuantSome $ Qu.generateAll $ \case
+      PB.OriginalRepr -> a
+      PB.PatchedRepr -> b
+
+pattern PatchPairSingle :: () => forall x. PB.WhichBinaryRepr x -> tp x -> PatchPair tp
+pattern PatchPairSingle repr x <- (Qu.Single repr x)
+  where
+      PatchPairSingle repr x = Qu.QuantSome $ Qu.QuantOne repr x
 
 pattern PatchPairOriginal :: tp PB.Original -> PatchPair tp
 pattern PatchPairOriginal a = PatchPairSingle PB.OriginalRepr a
@@ -316,8 +331,8 @@ mkSingle bin a = PatchPairSingle bin a
 -- | Return the single 'tp' and which binary if the input is a singleton 'PatchPair'.
 --   'asSingleton (toSingleton bin x) == (bin, x)' when 'x' contains an entry for 'bin'
 --   '(y,bin) <- asSingleton x; toSingleton bin y == x' when 'x' is a singleton
-asSingleton :: PatchPairM m => PatchPair tp -> m (Pair PB.WhichBinaryRepr tp)
-asSingleton (PatchPairSingle bin v) = return (Pair bin v)
+asSingleton :: PatchPairM m => Qu.Quant tp qbin -> m (Pair PB.WhichBinaryRepr tp)
+asSingleton (Qu.Single bin v) = return (Pair bin v)
 asSingleton _ = throwPairErr
 
 -- | Convert a 'PatchPair' into a singleton containing only
@@ -383,7 +398,7 @@ insertWith bin v f = \case
 type PatchPairC tp = PatchPair (Const tp)
 
 pattern PatchPairC :: tp -> tp -> PatchPair (Const tp)
-pattern PatchPairC a b = PatchPairCtor (Const a) (Const b)
+pattern PatchPairC a b = PatchPair (Const a) (Const b)
 
 {-# COMPLETE PatchPairC, PatchPairSingle #-}
 {-# COMPLETE PatchPairC, PatchPairOriginal, PatchPairPatched #-}
@@ -404,7 +419,7 @@ instance (forall tp. Show (t (f tp))) => ShowF (LiftF t f)
 type PatchPairF t tp = PatchPair (LiftF t tp)
 
 pattern PatchPairF :: t (tp PB.Original) -> t (tp PB.Patched) -> PatchPair (LiftF t tp)
-pattern PatchPairF a b = PatchPairCtor (LiftF a) (LiftF b)
+pattern PatchPairF a b = PatchPair (LiftF a) (LiftF b)
 
 {-# COMPLETE PatchPairF, PatchPairSingle #-}
 {-# COMPLETE PatchPairF, PatchPairOriginal, PatchPairPatched #-}
@@ -512,56 +527,11 @@ forBins2 f = fmap unzipPatchPair2 $ forBins $ \bin -> do
 ppEq :: PP.Pretty x => PP.Pretty y => x -> y -> Bool
 ppEq x y = show (PP.pretty x) == show (PP.pretty y)
 
-instance TestEquality tp => Eq (PatchPair tp) where
-  PatchPair o1 p1 == PatchPair o2 p2
-    | Just Refl <- testEquality o1 o2
-    , Just Refl <- testEquality p1 p2
-    = True
-  PatchPairSingle _ a1 == PatchPairSingle _ a2 | Just Refl <- testEquality a1 a2 = True
-  _ == _ = False
-
-instance forall tp. (TestEquality tp, OrdF tp) => Ord (PatchPair tp) where
-  compare pp1 pp2 = case (pp1,pp2) of
-    (PatchPair o1 p1, PatchPair o2 p2) -> toOrdering $ (lexCompareF o1 o2 (compareF p1 p2))
-    (PatchPairSingle _ s1, PatchPairSingle _ s2) -> toOrdering $ compareF s1 s2
-    (PatchPairSingle{},PatchPair{}) -> LT
-    (PatchPair{},PatchPairSingle{}) -> GT
-
-instance TF.FunctorF PatchPair where
-  fmapF = TF.fmapFDefault
-
-instance TF.FoldableF PatchPair where
-  foldMapF = TF.foldMapFDefault
-
-instance (forall bin. PEM.ExprMappable sym (f bin)) => PEM.ExprMappable sym (PatchPair f) where
-  mapExpr sym f pp = TF.traverseF (PEM.mapExpr sym f) pp
-
-instance TF.TraversableF PatchPair where
-  traverseF f pp = case pp of
-    (PatchPair o p) -> PatchPair <$> f o <*> f p
-    (PatchPairSingle bin s) -> PatchPairSingle bin <$> f s
-
-
-instance ShowF tp => Show (PatchPair tp) where
-  show (PatchPair a1 a2) = 
-    let
-      s1 = showF a1
-      s2 = showF a2
-    in if s1 == s2 then s1 else s1 ++ " vs. " ++ s2
-  show (PatchPairOriginal a1) = showF a1 ++ " (original)"
-  show (PatchPairPatched a1) = showF a1 ++ " (patched)"
-
-instance (forall bin. PP.Pretty (f bin)) => PP.Pretty (PatchPair f) where
-  pretty = ppPatchPairEq ppEq PP.pretty
-
 ppPatchPair' :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
 ppPatchPair' f pPair = ppPatchPairEq (\x y -> show (f x) == show (f y)) f pPair
 
-
 ppPatchPair :: (forall bin. tp bin -> PP.Doc a) -> PatchPair tp -> PP.Doc a
-ppPatchPair f (PatchPair a1 a2) = f a1 PP.<+> "(original) vs." PP.<+> f a2 PP.<+> "(patched)"
-ppPatchPair f (PatchPairOriginal a1) = f a1 PP.<+> "(original)"
-ppPatchPair f (PatchPairPatched a1) = f a1 PP.<+> "(patched)"
+ppPatchPair = PB.ppBinaryPair
 
 ppPatchPairEq ::
   (tp PB.Original -> tp PB.Patched -> Bool) ->
@@ -591,48 +561,3 @@ ppPatchPairCEq f ppair@(PatchPair (Const o) (Const p)) = case o == p of
   False -> ppPatchPairC f ppair
 ppPatchPairCEq f (PatchPairOriginal (Const a)) = f a PP.<+> "(original)"
 ppPatchPairCEq f (PatchPairPatched (Const a)) = f a PP.<+> "(patched)"
-
-
-jsonPatchPair ::
-  (forall bin. tp bin -> JSON.Value) -> PatchPair tp -> JSON.Value
-jsonPatchPair f ppair = case ppair of
-  PatchPair o p -> JSON.object [ "original" JSON..= (f o), "patched" JSON..= (f p)]
-  PatchPairOriginal o -> JSON.object [ "original" JSON..= (f o) ]
-  PatchPairPatched p -> JSON.object [ "patched" JSON..= (f p) ]
-
-
-instance (forall bin. JSON.ToJSON (tp bin)) => JSON.ToJSON (PatchPair tp) where
-  toJSON p = jsonPatchPair (JSON.toJSON) p
-
-w4SerializePair :: PatchPair f -> (forall bin. f bin -> W4S.W4S sym JSON.Value) -> W4S.W4S sym JSON.Value
-w4SerializePair ppair f = case ppair of
-    PatchPair o p -> do
-      o_v <- f o
-      p_v <- f p
-      return $ JSON.object ["original" JSON..= o_v, "patched" JSON..= p_v]
-    PatchPairOriginal o -> do
-      o_v <- f o
-      return $ JSON.object ["original" JSON..= o_v]
-    PatchPairPatched p -> do
-      p_v <- f p
-      return $ JSON.object ["patched" JSON..= p_v]
-
-instance W4S.W4SerializableF sym f => W4S.W4Serializable sym (PatchPair f) where
-  w4Serialize ppair = w4SerializePair ppair w4SerializeF
-
-
-instance (forall bin. PB.KnownBinary bin => W4Deserializable sym (f bin)) => W4Deserializable sym (PatchPair f) where
-  w4Deserialize_ v = do
-    JSON.Object o <- return v
-    let
-      case_pair = do
-        (vo :: f PB.Original) <- o .: "original"
-        (vp :: f PB.Patched) <- o .: "patched"
-        return $ PatchPair vo vp
-      case_orig = do
-        (vo :: f PB.Original) <- o .: "original"
-        return $ PatchPairOriginal vo
-      case_patched = do
-        (vp :: f PB.Patched) <- o .: "patched"
-        return $ PatchPairPatched vp
-    case_pair <|> case_orig <|> case_patched

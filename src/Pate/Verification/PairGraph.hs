@@ -157,6 +157,7 @@ import           Data.Parameterized.Classes
 import           Data.Set (Set)
 import qualified Data.Set as Set
 import           Data.Word (Word32)
+import qualified Data.Quant as Qu
 import qualified Lumberjack as LJ
 
 import           Data.Parameterized (Some(..), Pair (..))
@@ -333,8 +334,10 @@ data WorkItem arch =
       (SingleNodeEntry arch PBi.Original) 
       (SingleNodeEntry arch PBi.Patched)
   -- | Handle starting a split analysis from a diverging node.
-  | ProcessSplitCtor (Some (SingleNodeEntry arch)) 
-  deriving (Eq, Ord)
+  | ProcessSplitCtor (Some (Qu.AsSingle (NodeEntry' arch)))
+
+deriving instance Eq (WorkItem arch)
+deriving instance Ord (WorkItem arch)
 
 instance PA.ValidArch arch => Show (WorkItem arch) where
   show = \case
@@ -362,8 +365,7 @@ pattern ProcessMerge:: SingleNodeEntry arch PBi.Original -> SingleNodeEntry arch
 pattern ProcessMerge sneO sneP <- (processMergeSinglePair -> Just (sneO, sneP))
 
 pattern ProcessSplit :: SingleNodeEntry arch bin -> WorkItem arch
-pattern ProcessSplit sne <- ProcessSplitCtor (Some sne)
-
+pattern ProcessSplit sne = ProcessSplitCtor (Some (Qu.AsSingle sne))
 
 {-# COMPLETE ProcessNode, ProcessMergeAtExits, ProcessMergeAtEntry, ProcessSplit #-}
 {-# COMPLETE ProcessNode, ProcessMerge, ProcessSplit #-}
@@ -436,7 +438,7 @@ data SyncData arch =
       -- | Defines exceptions for exits that would otherwise be considered sync points.
       --   In these cases, the single-sided analysis continues instead, with the intention
       --   that another sync point is encountered after additional instructions are executed
-    , _syncExceptions :: PPa.PatchPair (SetF (TupleF '(SingleNodeEntry arch, PB.BlockTarget arch)))
+    , _syncExceptions :: PPa.PatchPair (SetF (TupleF '(Qu.AsSingle (NodeEntry' arch), PB.BlockTarget arch)))
       -- Exits from the corresponding desync node that start the single-sided analysis
     , _syncDesyncExits :: PPa.PatchPair (SetF (PB.BlockTarget arch))
     }
@@ -451,7 +453,9 @@ syncPointBin :: SyncPoint arch bin -> PBi.WhichBinaryRepr bin
 syncPointBin sp = singleEntryBin $ syncPointNode sp
 
 instance TestEquality (SyncPoint arch) where
-  testEquality e1 e2 = testEquality (syncPointNode e1) (syncPointNode e2)
+  testEquality e1 e2 = case testEquality (syncPointNode e1) (syncPointNode e2) of
+    Just Refl -> Just Refl
+    Nothing -> Nothing
 
 instance OrdF (SyncPoint arch) where
   compareF sp1 sp2 = lexCompareF (syncPointBin sp1) (syncPointBin sp2) $
@@ -595,7 +599,7 @@ mkProcessSplit sne = do
   GraphNode dp_ne <- return $ singleNodeDivergePoint sne
   sne_dp <- toSingleNodeEntry (singleEntryBin sne) dp_ne
   guard (sne_dp == sne)
-  return (ProcessSplitCtor (Some sne))
+  return (ProcessSplit sne)
 
 
 workItemNode :: WorkItem arch -> GraphNode arch
@@ -1271,9 +1275,9 @@ pgMaybe msg Nothing = throwError $ PEE.PairGraphErr msg
 -- FIXME: do we need to support mismatched node kinds here?
 combineNodes :: SingleNodeEntry arch bin -> SingleNodeEntry arch (PBi.OtherBinary bin) -> Maybe (GraphNode arch)
 combineNodes node1 node2 = do
-  let ndPair = PPa.mkPair (singleEntryBin node1) node1 node2
-  nodeO <- PPa.get PBi.OriginalRepr ndPair
-  nodeP <- PPa.get PBi.PatchedRepr ndPair
+  let ndPair = PPa.mkPair (singleEntryBin node1) (Qu.AsSingle node1) (Qu.AsSingle node2)
+  Qu.AsSingle nodeO <- PPa.get PBi.OriginalRepr ndPair
+  Qu.AsSingle nodeP <- PPa.get PBi.PatchedRepr ndPair
   -- it only makes sense to combine nodes that share a divergence point,
   -- where that divergence point will be used as the calling context for the
   -- merged point
@@ -1458,7 +1462,7 @@ isSyncExit ::
 isSyncExit sne blkt@(PB.BlockTarget{}) = do
   excepts <- getSingleNodeData syncExceptions sne
   syncs <- getSingleNodeData syncPoints sne
-  let isExcept = Set.member (TupleF2 sne blkt) excepts 
+  let isExcept = Set.member (TupleF2 (Qu.AsSingle sne) blkt) excepts 
   case isExcept of
     True -> return Nothing
     False -> isCutAddressFor sne (PB.targetRawPC blkt) >>= \case
@@ -1528,7 +1532,7 @@ filterSyncExits priority (ProcessSplit sne) blktPairs = pgValid $ do
       return x
 filterSyncExits priority (ProcessNode (GraphNode ne)) blktPairs = case asSingleNodeEntry ne of
   Nothing -> return blktPairs
-  Just (Some sne) -> do
+  Just (Some (Qu.AsSingle sne)) -> do
     let bin = singleEntryBin sne
     blkts <- mapM (PPa.get bin) blktPairs
     syncExits <- catMaybes <$> mapM (isSyncExit sne) blkts
@@ -1543,14 +1547,14 @@ addReturnPointSync ::
   PPa.PatchPair (PB.BlockTarget arch) ->
   PairGraphM sym arch ()
 addReturnPointSync priority ne blktPair = case asSingleNodeEntry ne of
-  Just (Some sne) -> do
+  Just (Some (Qu.AsSingle sne)) -> do
     let bin = singleEntryBin sne
     blkt <- PPa.get bin blktPair
     case PB.targetReturn blkt of
       Just ret -> do
         cuts <- getSingleNodeData syncCutAddresses sne
         excepts <- getSingleNodeData syncExceptions sne
-        let isExcept = Set.member (TupleF2 sne blkt) excepts
+        let isExcept = Set.member (TupleF2 (Qu.AsSingle sne) blkt) excepts
         case (not isExcept) &&
           Set.member (PPa.WithBin (singleEntryBin sne) (PB.concreteAddress ret)) cuts of
             True -> do
@@ -1600,7 +1604,7 @@ handleSingleSidedReturnTo ::
   NodeEntry arch ->
   PairGraphM sym arch ()
 handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
-  Just (Some sne) -> do
+  Just (Some (Qu.AsSingle sne)) -> do
     let bin = singleEntryBin sne
     let dp = singleNodeDivergePoint sne
     syncAddrs <- getSyncData syncCutAddresses bin dp
