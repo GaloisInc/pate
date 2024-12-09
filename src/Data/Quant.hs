@@ -63,6 +63,7 @@ module Data.Quant
     , pattern All
     , pattern Single
     , viewQuantEach
+    , pattern QuantEach
   ) where
 
 import           Prelude hiding (map, traverse)
@@ -401,14 +402,17 @@ quantAsOne q = case q of
         Nothing -> Nothing
     _ -> Nothing
 
+existsOrCases :: forall tp tp' a. IsExistsOr tp tp' => (tp ~ ExistsK => a) ->  (tp ~ tp' => a) ->  a
+existsOrCases f g = case (isExistsOr :: Either (tp :~: ExistsK) (tp :~: tp')) of
+    Left Refl -> f
+    Right Refl -> g
 
 -- | Pattern for creating or matching a singleton 'Quant', generalized over the existential cases
 pattern Single :: forall {k} f tp. (HasReprK k) => forall x. (IsExistsOr tp (OneK (TheOneK tp)), Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
 pattern Single repr x <- (quantAsOne -> Just (QuantAsOneProof repr x))
     where
-        Single repr x = case (isExistsOr :: Either (tp :~: ExistsK) (tp :~: (OneK (TheOneK tp)))) of
-            Left Refl -> QuantExists (Single repr x)
-            Right Refl -> QuantOne repr x
+        Single repr x = existsOrCases @tp @(OneK (TheOneK tp)) (QuantExists (Single repr x)) (QuantOne repr x)
+
 
 {-# COMPLETE Single, All #-}
 {-# COMPLETE Single, QuantAll, QuantAny #-}
@@ -444,4 +448,15 @@ type QuantEach (f :: QuantK k -> Type) = Quant (AsOneK f) AllK
 viewQuantEach :: HasReprK k => QuantEach f -> (forall (x :: k). ReprOf x -> f (OneK x))
 viewQuantEach (QuantAll f) = \r -> case TMF.apply f r of AsOneK x -> x
 
+viewQuantEach' :: HasReprK k => Quant (AsOneK f) tp -> Maybe (Dict (IsExistsOr tp AllK), forall (x :: k). ReprOf x -> f (OneK x))
+viewQuantEach' q = case q of
+    QuantOne{} -> Nothing
+    QuantAll f -> Just (Dict, \r -> case TMF.apply f r of AsOneK x -> x)
+    QuantSome q' -> case viewQuantEach' q' of
+        Just (Dict, g) -> Just (Dict, g)
+        Nothing -> Nothing
 
+pattern QuantEach :: forall {k} f tp. (HasReprK k) => (IsExistsOr tp AllK) => (forall (x :: k). ReprOf x -> f (OneK x)) -> Quant (AsOneK f) tp
+pattern QuantEach f <- (viewQuantEach' -> Just (Dict, f))
+    where
+        QuantEach f = existsOrCases @tp @AllK (QuantAny (QuantEach f)) (QuantAll (TMF.mapWithKey (\r _ -> AsOneK (f r)) (allReprs @k)))
