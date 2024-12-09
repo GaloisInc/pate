@@ -613,8 +613,7 @@ withSimSpec ::
   EquivM sym arch (SimSpec sym arch g)
 withSimSpec blocks spec f = withSym $ \sym -> do
   spec_fresh <- withFreshVars blocks $ \vars -> liftIO $ bindSpec sym vars spec
-  forSpec spec_fresh $ \scope body ->
-    withAssumptionSet (scopeAsm scope) (f scope body)
+  forSpec spec_fresh $ \scope body -> (f scope body)
 
 lookupArgumentNamesSingle
   :: PBi.WhichBinaryRepr bin
@@ -654,14 +653,13 @@ currentAsm = CMR.asks envCurrentFrame
 
 withFreshScope ::
   forall sym arch f.
-  Scoped f =>
   PB.BlockPair arch ->
-  (forall v. SimScope sym arch v -> EquivM sym arch (f v)) ->
-  EquivM sym arch (SimSpec sym arch f)
+  (forall v. SimScope sym arch v -> EquivM sym arch f) ->
+  EquivM sym arch f
 withFreshScope bPair f = do
   dummy_spec <- withFreshVars @sym @arch @(WithScope ()) bPair $ \_ -> do
-    return (mempty, WithScope ())
-  forSpec dummy_spec $ \scope _ -> f scope
+    return (WithScope ())
+  fmap (\x -> viewSpecBody x unWS) $ forSpec dummy_spec $ \scope _ -> WithScope <$> f scope
 
 -- | Create a new 'SimSpec' by evaluating the given function under a fresh set
 -- of bound variables. The returned 'AssumptionSet' is set as the assumption
@@ -670,7 +668,7 @@ withFreshVars ::
   forall sym arch f.
   Scoped f =>
   PB.BlockPair arch ->
-  (forall v. (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched) -> EquivM sym arch (AssumptionSet sym,(f v))) ->
+  (forall v. (SimVars sym arch v PBi.Original, SimVars sym arch v PBi.Patched) -> EquivM sym arch (f v)) ->
   EquivM sym arch (SimSpec sym arch f)
 withFreshVars blocks f = do
   argNames <- lookupArgumentNames blocks

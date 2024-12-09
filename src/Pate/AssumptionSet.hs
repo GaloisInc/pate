@@ -138,6 +138,11 @@ instance OrdF (W4.SymExpr sym) => PEM.ExprMappable sym (AssumptionSet sym) where
         return $ MapF.singleton k' v'
     return $ mkAssumptionSet sym ps' (foldr (mergeExprSetFMap (Proxy @sym)) MapF.empty bs')
 
+instance PEM.ExprFoldable sym (AssumptionSet sym) where
+  foldExpr sym f (AssumptionSet ps bs) acc =
+    PEM.withSymExprFoldable @W4.BaseBoolType sym $
+      PEM.foldExpr sym f ps acc >>= PEM.foldExpr sym f bs
+
 instance forall sym. W4S.SerializableExprs sym => W4S.W4Serializable sym (AssumptionSet sym) where
   w4Serialize (AssumptionSet ps bs) | SetF.null ps, MapF.null bs = W4S.w4Serialize True
   w4Serialize (AssumptionSet ps bs) | [p] <- SetF.toList ps, MapF.null bs = W4S.w4SerializeF p
@@ -165,6 +170,11 @@ data NamedAsms sym (nm :: Symbol) =
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (NamedAsms sym nm) where
   w4Serialize (NamedAsms asm) = W4S.w4Serialize asm
+
+instance PEM.ExprFoldable sym (NamedAsms sym nm) where
+  foldExpr sym f (NamedAsms asm) acc = PEM.foldExpr sym f asm acc
+
+instance PEM.ExprFoldableF sym (NamedAsms sym)
 
 instance PEM.ExprMappable sym (NamedAsms sym nm) where
   mapExpr sym f (NamedAsms asm) = NamedAsms <$> PEM.mapExpr sym f asm

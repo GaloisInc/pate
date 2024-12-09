@@ -180,6 +180,12 @@ instance PEM.ExprMappable sym (MemCell sym arch w) where
     ptr' <- WEH.mapExprPtr sym f ptr
     return $ MemCell ptr' w end
 
+instance PEM.ExprFoldable sym (MemCell sym arch w) where
+  foldExpr _sym f (MemCell (CLM.LLVMPointer reg off) _w _end) b =
+    f (WI.natToIntegerPure reg) b >>= f off
+
+instance PEM.ExprFoldableF sym (MemCell sym arch)
+
 ppCell :: (WI.IsExprBuilder sym) => MemCell sym arch w -> PP.Doc a
 ppCell cell =
   let CLM.LLVMPointer reg off = cellPtr cell
