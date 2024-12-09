@@ -326,7 +326,7 @@ instance HasReprK k => ToMaybeQuant (Quant f) (tp1 :: QuantK k) (tp2 :: QuantK k
         -- good reason
 
 
-class (Antecedent p c => c) => Implies p c where
+class (Antecedent p c => c) => Implies (p :: Constraint) (c :: Constraint) where
     type Antecedent p c :: Constraint
 
 instance Implies (IsOneK AllK) c where
@@ -360,17 +360,35 @@ pattern QuantToOne :: forall {k} x f tp. (KnownHasRepr (x :: k), HasReprK k) => 
 pattern QuantToOne fx <- (asQuantOne (knownRepr :: ReprOf x) -> Just (Dict, Dict, _, fx))
 
 
-class IsExistsOr (tp1 :: QuantK k) (tp2 :: QuantK k) where
-    isExistsOr :: Either (tp1 :~: ExistsK) (tp1 :~: tp2)
+data ExistsOrCases (tp1 :: QuantK k) (tp2 :: QuantK k) where
+    ExistsOrRefl :: ExistsOrCases tp tp
+    ExistsOrExists :: ExistsOrCases ExistsK tp
+
+type family IsExistsOrConstraint (tp1 :: QuantK k) (tp2 :: QuantK k) :: Constraint
+
+class IsExistsOrConstraint tp1 tp2 => IsExistsOr (tp1 :: QuantK k) (tp2 :: QuantK k) where
+    isExistsOr :: ExistsOrCases tp1 tp2
+    
+type instance IsExistsOrConstraint x x = ()
 
 instance IsExistsOr x x where
-    isExistsOr = Right Refl
+    isExistsOr = ExistsOrRefl
+
+type instance IsExistsOrConstraint ExistsK (OneK k) = ()
 
 instance IsExistsOr ExistsK (OneK k) where
-    isExistsOr = Left Refl
+    isExistsOr = ExistsOrExists
+
+type instance IsExistsOrConstraint ExistsK AllK = ()
 
 instance IsExistsOr ExistsK AllK where
-    isExistsOr = Left Refl
+    isExistsOr = ExistsOrExists
+
+-- Impossible cases
+type instance IsExistsOrConstraint (AllK :: QuantK k) ExistsK = (AllK :: QuantK k) ~ ExistsK
+type instance IsExistsOrConstraint (OneK k) ExistsK = (OneK k) ~ ExistsK
+type instance IsExistsOrConstraint (OneK x) AllK = (OneK x) ~ AllK
+type instance IsExistsOrConstraint AllK (OneK x) = AllK ~ (OneK x)
 
 data QuantAsAllProof (f :: k -> Type) (tp :: QuantK k) where
     QuantAsAllProof :: (IsExistsOr tp AllK) => (forall x. ReprOf x -> f x) -> QuantAsAllProof f tp
@@ -387,9 +405,9 @@ quantAsAll q = case q of
 pattern All :: forall {k} f tp. (HasReprK k) => (IsExistsOr tp AllK) => (forall x. ReprOf x -> f x) -> Quant (f :: k -> Type) tp
 pattern All f <- (quantAsAll -> Just (QuantAsAllProof f))
     where
-        All f = case (isExistsOr :: Either (tp :~: ExistsK) (tp :~: AllK)) of
-            Left Refl -> QuantAny (All f)
-            Right Refl -> QuantAll (TMF.mapWithKey (\repr _ -> f repr) (allReprs @k))
+        All f = case (isExistsOr :: ExistsOrCases tp AllK) of
+            ExistsOrExists -> QuantAny (All f)
+            ExistsOrRefl -> QuantAll (TMF.mapWithKey (\repr _ -> f repr) (allReprs @k))
 
 data QuantAsOneProof (f :: k -> Type) (tp :: QuantK k) where
     QuantAsOneProof :: (IsExistsOr tp (OneK (TheOneK tp)), Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> QuantAsOneProof f tp
@@ -403,9 +421,9 @@ quantAsOne q = case q of
     _ -> Nothing
 
 existsOrCases :: forall tp tp' a. IsExistsOr tp tp' => (tp ~ ExistsK => a) ->  (tp ~ tp' => a) ->  a
-existsOrCases f g = case (isExistsOr :: Either (tp :~: ExistsK) (tp :~: tp')) of
-    Left Refl -> f
-    Right Refl -> g
+existsOrCases f g = case (isExistsOr :: ExistsOrCases tp tp') of
+    ExistsOrExists -> f
+    ExistsOrRefl -> g
 
 -- | Pattern for creating or matching a singleton 'Quant', generalized over the existential cases
 pattern Single :: forall {k} f tp. (HasReprK k) => forall x. (IsExistsOr tp (OneK (TheOneK tp)), Implies (IsOneK tp) (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
@@ -460,3 +478,15 @@ pattern QuantEach :: forall {k} f tp. (HasReprK k) => (IsExistsOr tp AllK) => (f
 pattern QuantEach f <- (viewQuantEach' -> Just (Dict, f))
     where
         QuantEach f = existsOrCases @tp @AllK (QuantAny (QuantEach f)) (QuantAll (TMF.mapWithKey (\r _ -> AsOneK (f r)) (allReprs @k)))
+
+{-# COMPLETE QuantEach, Single #-}
+
+_testQuantEach :: forall {k} f tp. HasReprK k => Quant (AsOneK (f :: QuantK k -> Type)) tp -> ()
+_testQuantEach = \case
+    QuantEach (_f :: forall (x :: k). ReprOf x -> f (OneK x)) -> ()
+    Single (_repr :: ReprOf (x :: k)) (AsOneK (_x :: f (OneK x))) -> ()
+
+_testQuantEach1 :: HasReprK k => Quant (AsOneK (f :: QuantK k -> Type)) AllK -> ()
+_testQuantEach1 = \case
+    QuantEach (_f :: forall (x :: k). ReprOf x -> f (OneK x)) -> ()
+    -- complete match, since Single has an unsolvable constraint
