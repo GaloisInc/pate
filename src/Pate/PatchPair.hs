@@ -331,8 +331,8 @@ mkSingle bin a = PatchPairSingle bin a
 -- | Return the single 'tp' and which binary if the input is a singleton 'PatchPair'.
 --   'asSingleton (toSingleton bin x) == (bin, x)' when 'x' contains an entry for 'bin'
 --   '(y,bin) <- asSingleton x; toSingleton bin y == x' when 'x' is a singleton
-asSingleton :: PatchPairM m => PatchPair tp -> m (Pair PB.WhichBinaryRepr tp)
-asSingleton (PatchPairSingle bin v) = return (Pair bin v)
+asSingleton :: PatchPairM m => Qu.Quant tp qbin -> m (Pair PB.WhichBinaryRepr tp)
+asSingleton (Qu.Single bin v) = return (Pair bin v)
 asSingleton _ = throwPairErr
 
 -- | Convert a 'PatchPair' into a singleton containing only

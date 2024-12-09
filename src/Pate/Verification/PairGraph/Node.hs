@@ -16,10 +16,14 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE QuantifiedConstraints #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module Pate.Verification.PairGraph.Node (
     GraphNode
   , GraphNode'(..)
+  , NodeEntry'
+  , NodeReturn'
   , NodeEntry
   , NodeReturn
   , CallingContext
@@ -62,6 +66,9 @@ module Pate.Verification.PairGraph.Node (
   , singleNodeDivergence
   , toSingleNodeEntry
   , singleNodeAddr
+  , SingleNodeReturn
+  , SingleGraphNode
+  , pattern SingleNodeReturn
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -83,6 +90,7 @@ import Control.Monad (guard)
 import Data.Parameterized.Classes
 import Pate.Panic
 import qualified Pate.Address as PAd
+import Data.Kind (Type)
 
 -- | Nodes in the program graph consist either of a pair of
 --   program points (GraphNode), or a synthetic node representing
@@ -112,18 +120,31 @@ instance PA.ValidArch arch => W4S.W4Serializable sym (GraphNode' arch bin) where
 instance PA.ValidArch arch => W4S.W4Serializable sym (NodeEntry' arch bin) where
   w4Serialize r = return $ JSON.toJSON r
 
-data NodeContent arch e = 
-  NodeContent { nodeContentCtx :: CallingContext arch, nodeContent :: e }
-  deriving (Eq, Ord)
+data NodeContent arch (f :: PB.WhichBinary -> Type) (qbin :: QuantK PB.WhichBinary) = 
+  NodeContent { nodeContentCtx :: CallingContext arch, nodeContent :: Quant f qbin }
 
-type NodeEntry' arch (bin :: QuantK PB.WhichBinary) = NodeContent arch (Quant (PB.ConcreteBlock arch) bin)
+deriving instance (forall x. Eq (f x)) => Eq (NodeContent arch f qbin)
+deriving instance (forall x. Ord (f x)) => Ord (NodeContent arch f qbin)
+
+instance (forall x. Eq (f x)) => TestEquality (NodeContent arch f) where
+  testEquality (NodeContent cctx1 x1) (NodeContent cctx2 x2) | cctx1 == cctx2, Just Refl <- testEquality x1 x2 = Just Refl
+  testEquality _ _ = Nothing
+
+instance (forall x. Ord (f x)) => OrdF (NodeContent arch f) where
+  compareF (NodeContent cctx1 x1) (NodeContent cctx2 x2) = lexCompareF x1 x2 $ fromOrdering (compare cctx1 cctx2)
+
+type NodeEntry' arch = NodeContent arch (PB.ConcreteBlock arch)
 type NodeEntry arch = NodeEntry' arch ExistsK
 
+instance Qu.ToQuant (Quant (PB.ConcreteBlock arch)) q q' => Qu.ToQuant (NodeEntry' arch) q q' where
+  toQuant f (NodeEntry cctx blks) = NodeEntry cctx (Qu.toQuant f blks)
 
 pattern NodeEntry :: CallingContext arch -> Quant (PB.ConcreteBlock arch) bin -> NodeEntry' arch bin
 pattern NodeEntry ctx bp = NodeContent ctx bp
 {-# COMPLETE NodeEntry #-}
 
+nodeEntryRepr :: NodeEntry' arch qbin -> Qu.QuantRepr qbin
+nodeEntryRepr ne = Qu.quantToRepr $ nodeBlocks ne
 
 nodeBlocks :: NodeEntry' arch bin -> Quant (PB.ConcreteBlock arch) bin
 nodeBlocks = nodeContent
@@ -131,8 +152,11 @@ nodeBlocks = nodeContent
 graphNodeContext :: NodeEntry' arch bin -> CallingContext arch
 graphNodeContext = nodeContentCtx
 
-type NodeReturn' arch bin = NodeContent arch (Quant (PB.FunctionEntry arch) bin)
+type NodeReturn' arch = NodeContent arch (PB.FunctionEntry arch)
 type NodeReturn arch = NodeReturn' arch ExistsK
+
+nodeReturnRepr :: NodeReturn' arch qbin -> Qu.QuantRepr qbin
+nodeReturnRepr ne = Qu.quantToRepr $ nodeFuns ne
 
 nodeFuns :: NodeReturn' arch bin -> Quant (PB.FunctionEntry arch) bin
 nodeFuns = nodeContent
@@ -143,6 +167,9 @@ returnNodeContext = nodeContentCtx
 pattern NodeReturn :: CallingContext arch -> Quant (PB.FunctionEntry arch) bin -> NodeReturn' arch bin
 pattern NodeReturn ctx bp = NodeContent ctx bp
 {-# COMPLETE NodeReturn #-}
+
+instance Qu.ToQuant (Quant (PB.FunctionEntry arch)) q q' => Qu.ToQuant (NodeReturn' arch) q q' where
+  toQuant f (NodeReturn cctx fns)  = NodeReturn cctx (Qu.toQuant f fns)
 
 graphNodeBlocks :: GraphNode' arch bin -> Quant (PB.ConcreteBlock arch) bin
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
@@ -404,49 +431,40 @@ instance forall sym arch. PA.ValidArch arch => IsTraceNode '(sym, arch) "entryno
 -- | Equivalent to a 'NodeEntry' but necessarily a single-sided node.
 --   Converting a 'SingleNodeEntry' to a 'NodeEntry' is always defined,
 --   while converting a 'NodeEntry' to a 'SingleNodeEntry' is partial.
-data SingleNodeEntry arch bin = 
-  SingleNodeEntry 
-    { singleEntryBin :: PB.WhichBinaryRepr bin
-    , _singleEntry :: NodeContent arch (PB.ConcreteBlock arch bin)
-    }
+
+type SingleNodeEntry arch bin = NodeEntry' arch (Qu.OneK bin)
+
+pattern SingleNodeEntry :: CallingContext arch -> PB.ConcreteBlock arch bin -> SingleNodeEntry arch bin
+pattern SingleNodeEntry cctx blk <- ((\l -> case l of NodeEntry cctx (Qu.Single _ blk) -> (cctx,blk)) -> (cctx,blk))
+  where
+    SingleNodeEntry cctx blk = NodeEntry cctx (Qu.Single (PB.blockBinRepr blk) blk)
+
+{-# COMPLETE SingleNodeEntry #-}
+
+singleEntryBin :: SingleNodeEntry arch bin -> PB.WhichBinaryRepr bin
+singleEntryBin (nodeEntryRepr -> Qu.QuantOneRepr repr) = repr
 
 singleNodeAddr :: SingleNodeEntry arch bin -> PPa.WithBin (PAd.ConcreteAddress arch) bin
 singleNodeAddr se = PPa.WithBin (singleEntryBin se) (PB.concreteAddress (singleNodeBlock se))
 
-mkSingleNodeEntry :: NodeEntry arch -> PB.ConcreteBlock arch bin -> SingleNodeEntry arch bin
-mkSingleNodeEntry node blk = SingleNodeEntry (PB.blockBinRepr blk) (NodeContent (graphNodeContext node) blk)
+mkSingleNodeEntry :: NodeEntry' arch qbin -> PB.ConcreteBlock arch bin -> SingleNodeEntry arch bin
+mkSingleNodeEntry node blk = SingleNodeEntry (graphNodeContext node) blk
 
-instance TestEquality (SingleNodeEntry arch) where
-  testEquality se1 se2 | EQF <- compareF se1 se2 = Just Refl
-  testEquality _ _ = Nothing
-
-instance Eq (SingleNodeEntry arch bin) where
-  se1 == se2 = compare se1 se2 == EQ
-
-instance Ord (SingleNodeEntry arch bin) where
-  compare (SingleNodeEntry _ se1) (SingleNodeEntry _ se2) = compare se1 se2
-
-instance OrdF (SingleNodeEntry arch) where
-  compareF (SingleNodeEntry bin1 se1) (SingleNodeEntry bin2 se2) =
-    lexCompareF bin1 bin2 $ fromOrdering (compare se1 se2)
-
-instance PA.ValidArch arch => Show (SingleNodeEntry arch bin) where
-  show e = show (singleToNodeEntry e)
 
 singleNodeDivergePoint :: SingleNodeEntry arch bin -> GraphNode arch
-singleNodeDivergePoint (SingleNodeEntry _ (NodeContent cctx _)) = case divergePoint cctx of
+singleNodeDivergePoint (NodeEntry cctx _) = case divergePoint cctx of
   Just dp -> dp
   Nothing -> panic Verifier "singleNodeDivergePoint" ["missing diverge point for SingleNodeEntry"]
 
-asSingleNodeEntry :: PPa.PatchPairM m => NodeEntry arch -> m (Some (SingleNodeEntry arch))
-asSingleNodeEntry (NodeEntry cctx bPair) = do
-  Pair bin blk <- PPa.asSingleton bPair
+asSingleNodeEntry :: PPa.PatchPairM m => NodeEntry' arch qbin -> m (Some (Qu.AsSingle (NodeEntry' arch)))
+asSingleNodeEntry (NodeEntry cctx blks) = do
+  Pair _ blk <- PPa.asSingleton blks
   case divergePoint cctx of
-    Just{} -> return $ Some (SingleNodeEntry bin (NodeContent cctx blk))
+    Just{} -> return $ Some (Qu.AsSingle $ SingleNodeEntry cctx blk)
     Nothing -> PPa.throwPairErr
 
 singleNodeBlock :: SingleNodeEntry arch bin -> PB.ConcreteBlock arch bin
-singleNodeBlock (SingleNodeEntry _ (NodeContent _ blk)) = blk
+singleNodeBlock (SingleNodeEntry _ blk) = blk
 
 -- | Returns a 'SingleNodeEntry' for a given 'NodeEntry' if it has an entry
 --   for the given 'bin'.
@@ -461,15 +479,14 @@ toSingleNodeEntry bin ne = do
   case toSingleNode bin ne of
     Just (NodeEntry cctx bPair) -> do
       blk <- PPa.get bin bPair
-      return $ SingleNodeEntry bin (NodeContent cctx blk)
+      return $ SingleNodeEntry cctx blk
     _ -> PPa.throwPairErr
 
 singleToNodeEntry :: SingleNodeEntry arch bin -> NodeEntry arch
-singleToNodeEntry (SingleNodeEntry bin (NodeContent cctx v)) = 
-  NodeEntry cctx (PPa.PatchPairSingle bin v)
+singleToNodeEntry sne = Qu.toQuant Qu.QuantSomeRepr sne
 
 singleNodeDivergence :: SingleNodeEntry arch bin -> GraphNode arch
-singleNodeDivergence (SingleNodeEntry _ (NodeContent cctx _)) = case divergePoint cctx of
+singleNodeDivergence (SingleNodeEntry cctx _) = case divergePoint cctx of
   Just dp -> dp
   Nothing -> panic Verifier "singleNodeDivergence" ["Unexpected missing divergence point"]
 
@@ -477,12 +494,10 @@ combineSingleEntries' ::
   SingleNodeEntry arch PB.Original -> 
   SingleNodeEntry arch PB.Patched ->
   Maybe (NodeEntry arch)
-combineSingleEntries' (SingleNodeEntry _ eO) (SingleNodeEntry _ eP) = do
-  GraphNode divergeO <- divergePoint $ nodeContentCtx eO
-  GraphNode divergeP <- divergePoint $ nodeContentCtx eP
+combineSingleEntries' (SingleNodeEntry cctxO blksO) (SingleNodeEntry cctxP blksP) = do
+  GraphNode divergeO <- divergePoint $ cctxO
+  GraphNode divergeP <- divergePoint $ cctxP
   guard $ divergeO == divergeP
-  let blksO = nodeContent eO
-  let blksP = nodeContent eP
   return $ mkNodeEntry divergeO (PPa.PatchPair blksO blksP)
 
 -- | Create a combined two-sided 'NodeEntry' based on
@@ -498,3 +513,12 @@ combineSingleEntries ::
 combineSingleEntries sne1 sne2 = case singleEntryBin sne1 of
   PB.OriginalRepr -> combineSingleEntries' sne1 sne2
   PB.PatchedRepr -> combineSingleEntries' sne2 sne1
+
+type SingleNodeReturn arch bin = NodeReturn' arch (Qu.OneK bin)
+
+pattern SingleNodeReturn :: CallingContext arch -> PB.FunctionEntry arch bin -> SingleNodeReturn arch bin
+pattern SingleNodeReturn cctx fn <- ((\l -> case l of NodeReturn cctx (Qu.Single _ fn) -> (cctx,fn)) -> (cctx,fn))
+  where
+    SingleNodeReturn cctx fn = NodeReturn cctx (Qu.Single (PB.functionBinRepr fn) fn)
+
+type SingleGraphNode arch bin = GraphNode' arch (Qu.OneK bin)
