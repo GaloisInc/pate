@@ -229,7 +229,7 @@ common shared-test
 -- just used for loading test modules interactively
 library pate-test-base
   import: shared-test
-  hs-source-dirs: tests, arch
+  hs-source-dirs: tests, arch, tests/types
   other-modules: Pate.AArch32, Pate.PPC
   build-depends: semmc-aarch32,
                  macaw-aarch32,
@@ -310,6 +310,13 @@ test-suite pate-test-solver
                  asl-translator,
                  what4,
                  dismantle-arm-xml
+
+test-suite pate-test-types
+  import: shared-test
+  type: exitcode-stdio-1.0
+  main-is: TypesTestMain.hs
+  other-modules: QuantTest
+  hs-source-dirs: tests, tests/types
 
 common shared-exec
   ghc-options: -Wall -Wcompat
