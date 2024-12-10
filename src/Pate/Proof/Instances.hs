@@ -408,7 +408,7 @@ ppBlockSliceTransition ::
   PF.BlockSliceTransition grnd arch ->
   PP.Doc a
 ppBlockSliceTransition pre post bs = PP.vsep $
-  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (TF.fmapF (\(Const x) -> Const $ grndBlockCase x) groundEnd)
+  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (PPa.map (\(Const x) -> Const $ grndBlockCase x) groundEnd)
   ,  "Initial register state:"
   , ppRegs pre (PF.slRegState $ PF.slBlockPreState bs)
   , "Initial memory state:"
@@ -418,13 +418,13 @@ ppBlockSliceTransition pre post bs = PP.vsep $
   , "Final memory state:"
   , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
   , "Final IP:" <+> ppIPs (PF.slBlockPostState bs)
-  , case TF.fmapF (\(Const x) -> Const $ grndBlockReturn x) groundEnd of
+  , case PPa.map (\(Const x) -> Const $ grndBlockReturn x) groundEnd of
       PPa.PatchPairC (Just cont1) (Just cont2) ->
         "Function Continue Address:" <+> PPa.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PPa.PatchPairC cont1 cont2)
       _ -> PP.emptyDoc
   ]
   where
-    groundEnd = TF.fmapF (\(Const x) -> Const $ groundBlockEnd (Proxy @arch) x) $ PF.slBlockExitCase bs
+    groundEnd = PPa.map (\(Const x) -> Const $ groundBlockEnd (Proxy @arch) x) $ PF.slBlockExitCase bs
 
 ppIPs ::
   PA.ValidArch arch =>
@@ -434,7 +434,7 @@ ppIPs ::
 ppIPs st  =
   let
     pcRegs = (PF.slRegState st) ^. MM.curIP
-    vals = TF.fmapF (\(Const x) -> Const $ groundMacawValue x) (PF.slRegOpValues pcRegs)
+    vals = PPa.map (\(Const x) -> Const $ groundMacawValue x) (PF.slRegOpValues pcRegs)
   in case PG.groundValue $ PF.slRegOpEquiv pcRegs of
     True -> PP.pretty $ PPa.someC vals
     False -> PPa.ppPatchPairC PP.pretty vals
@@ -548,7 +548,7 @@ ppRegVal dom reg regOp = case PF.slRegOpRepr regOp of
          False -> Just $ ppSlotVal
   _ -> Just $ ppSlotVal
   where
-    vals = TF.fmapF (\(Const x) -> Const $ groundMacawValue x) $ PF.slRegOpValues regOp
+    vals = PPa.map (\(Const x) -> Const $ groundMacawValue x) $ PF.slRegOpValues regOp
     ppSlotVal = PP.pretty (showF reg) <> ":" <+> ppVals <+> ppDom
 
     ppDom = case regInGroundDomain dom reg of
@@ -581,7 +581,7 @@ ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
     True -> Just $ ppSlotVal
     False -> Nothing
   where
-    vals = TF.fmapF (\(Const x) -> Const $ groundBV x) $ PF.slMemOpValues memOp
+    vals = PPa.map (\(Const x) -> Const $ groundBV x) $ PF.slMemOpValues memOp
     ppSlotVal = ppGroundCell cell <> ":" <+> ppVals <+> ppDom
 
     ppDom = case cellInGroundDomain dom cell of

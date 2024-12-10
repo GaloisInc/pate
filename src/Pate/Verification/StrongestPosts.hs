@@ -60,6 +60,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.Parameterized.TraversableFC as TFC
 import           Data.Parameterized.Nonce
 import qualified Data.Parameterized.Context as Ctx
+import qualified Data.Quant as Qu
 
 import qualified What4.Expr as W4
 import qualified What4.Interface as W4
@@ -205,11 +206,11 @@ runVerificationLoop env pPairs = do
 asEntry :: PB.FunPair arch -> NodeEntry arch
 asEntry fnPair = 
   let 
-  bPair = TF.fmapF PB.functionEntryToConcreteBlock fnPair
+  bPair = PPa.map PB.functionEntryToConcreteBlock fnPair
   in (rootEntry bPair)
 
 asRootEntry :: GraphNode arch -> Maybe (PB.FunPair arch )
-asRootEntry (GraphNode ne) = Just (TF.fmapF PB.blockFunctionEntry (nodeBlocks ne))
+asRootEntry (GraphNode ne) = Just (PPa.map PB.blockFunctionEntry (nodeBlocks ne))
 asRootEntry (ReturnNode{}) = Nothing
 
 -- FIXME: clagged from initializePairGraph
@@ -761,7 +762,7 @@ withWorkItem gr0 f = do
       let nd = workItemNode wi
       res <- subTraceLabel @"node" (printPriorityKind priority) nd $ atPriority priority Nothing $ do
         (mnext, gr2) <- case wi of
-          ProcessNode (GraphNode ne) | Just (Some sne) <- asSingleNodeEntry ne -> do
+          ProcessNode (GraphNode ne) | Just (Some (Qu.AsSingle sne)) <- asSingleNodeEntry ne -> do
             (evalPG gr1 $ isSyncNode sne) >>= \case
               True -> do
                 gr2 <- execPG gr1 $ queueExitMerges (\pk -> mkPriority pk priority) (SyncAtStart sne)
@@ -1016,7 +1017,7 @@ instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalR
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (ConditionTraces sym arch) where
   w4Serialize (ConditionTraces p trT trF fps) = do
-    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF, "trace_footprint" W4S..= (TF.fmapF (\(Const(_,v)) -> Const v) fps) ]
+    W4S.object [ "predicate" W4S..== p, "trace_true" W4S..= trT, "trace_false" W4S..= trF, "trace_footprint" W4S..= (PPa.map (\(Const(_,v)) -> Const v) fps) ]
 
 
 instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "toplevel_result" where
@@ -1086,9 +1087,9 @@ orphanReturnBundle scope pPair = withSym $ \sym -> do
 
   simOut_ <- IO.withRunInIO $ \runInIO ->
     PA.withStubOverride sym archInfo wsolver ov $ \f -> runInIO $ do
-      outSt <- liftIO $ f (TF.fmapF PS.simInState simIn_)
+      outSt <- liftIO $ f (PPa.map PS.simInState simIn_)
       blkend <- liftIO $ MCS.initBlockEnd (Proxy @arch) sym MCS.MacawBlockEndReturn
-      return $ TF.fmapF (\st' -> PS.SimOutput st' blkend) outSt
+      return $ PPa.map (\st' -> PS.SimOutput st' blkend) outSt
 
   return $ PS.SimBundle simIn_ simOut_
 
@@ -1195,7 +1196,7 @@ getFunctionAbs node d gr = do
     Nothing -> do
       -- this is some sub-block in a function, so use the domain for
       -- the function entry point
-      let fnPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks node)  
+      let fnPair = PPa.map PB.blockFunctionEntry (nodeBlocks node)  
       case getCurrentDomain gr (GraphNode node) of
         Just preSpec -> PS.viewSpec preSpec $ \_ d' -> PPa.forBins $ \bin -> do
           vals <- PPa.get bin (PAD.absDomVals d')
@@ -1258,7 +1259,7 @@ withAbsDomain node d gr f = do
           defaultInit = PA.validArchInitAbs archData
         liftIO $ PD.addOverrides defaultInit pfm absSt
       withParsedFunctionMap pfm_pair $ do
-        let fnBlks = TF.fmapF (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
+        let fnBlks = PPa.map (PB.functionEntryToConcreteBlock . PB.blockFunctionEntry) (nodeBlocks node)
         PPa.catBins $ \bin -> do
           pfm <- PMC.parsedFunctionMap <$> getBinCtx
           fnBlks' <- PPa.get bin fnBlks
@@ -1429,7 +1430,7 @@ withValidInit ::
 withValidInit scope bPair f = withPair bPair $ do
   let
     vars = PS.scopeVars scope
-    varsSt = TF.fmapF PS.simVarState vars
+    varsSt = PPa.map PS.simVarState vars
 
   validInit <- PVV.validInitState bPair varsSt
   validAbs <- PPa.catBins $ \bin -> do
@@ -1568,7 +1569,7 @@ visitNode scope (workItemNode -> (ReturnNode fPair)) d gr0 =  do
     priority <- thisPriority
     let
       vars = PS.scopeVars scope
-      varsSt = TF.fmapF PS.simVarState vars
+      varsSt = PPa.map PS.simVarState vars
     validState <- PVV.validInitState ret varsSt
     withCurrentAbsDomain (functionEntryOf node) gr0' $ withAssumptionSet validState $ do
       (asm, bundle) <- returnSiteBundle scope vars d ret
@@ -2467,7 +2468,7 @@ triageBlockTarget scope bundle' paths currBlock st d blkts = withSym $ \sym -> d
       (_,PPa.PatchPairMismatch{}) -> handleDivergingPaths scope bundle' currBlock st d blkts
       _ | isMismatchedStubs stubPair -> handleDivergingPaths scope bundle' currBlock st d blkts
       (Just ecase, PPa.PatchPairJust rets) -> fmap (updateBranchGraph st blkts) $ do
-        let pPair = TF.fmapF PB.targetCall blkts
+        let pPair = PPa.map PB.targetCall blkts
         bundle <- PD.associateFrames bundle' ecase (hasStub stubPair)
         getSomeGroundTrace scope bundle d Nothing >>= emitTrace @"trace_events"
         traceBundle bundle ("  Return target " ++ show rets)
@@ -2487,7 +2488,7 @@ triageBlockTarget scope bundle' paths currBlock st d blkts = withSym $ \sym -> d
           MCS.MacawBlockEndReturn -> handleReturn scope bundle currBlock d gr
           _ -> do
             let
-              pPair = TF.fmapF PB.targetCall blkts
+              pPair = PPa.map PB.targetCall blkts
               nextNode = mkNodeEntry currBlock pPair
             traceBundle bundle "No return target identified"
             emitTrace @"message" "No return target identified"
@@ -2696,7 +2697,7 @@ handleTerminalFunction ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 handleTerminalFunction node gr = do
-  let fPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks node)
+  let fPair = PPa.map PB.blockFunctionEntry (nodeBlocks node)
   return $ addTerminalNode gr (mkNodeReturn node fPair)
 
 getStubOverrideOne ::
@@ -3021,7 +3022,7 @@ handleStub scope bundle currBlock d gr0_ pPair mpRetPair stubPair = fnTrace "han
           {- out <- PSi.applySimplifier unfold_simplifier (TF.fmapF PS.simOutState (PS.simOut bundle))
           nextStPair_ <- liftIO $ f out
           nextStPair <- PSi.applySimplifier unfold_simplifier nextStPair_ -}
-          nextStPair <- liftIO $ f (TF.fmapF PS.simOutState (PS.simOut bundle))
+          nextStPair <- liftIO $ f (PPa.map PS.simOutState (PS.simOut bundle))
           PPa.forBins $ \bin -> do
             nextSt <- PPa.get bin nextStPair
             output <- PPa.get bin (PS.simOut bundle)
@@ -3041,7 +3042,7 @@ handleReturn ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 handleReturn scope bundle currBlock d gr =
- do let fPair = TF.fmapF PB.blockFunctionEntry (nodeBlocks currBlock)
+ do let fPair = PPa.map PB.blockFunctionEntry (nodeBlocks currBlock)
     let ret = mkNodeReturn currBlock fPair
     let next = ReturnNode ret
     withTracing @"node" next $ 
@@ -3073,8 +3074,8 @@ mkSimBundle _pg node varsPair = fnTrace "mkSimBundle" $ do
     simOut_ <- mkSimOut simIn_
     return $ TupleF2 simIn_ simOut_
   let 
-    simIn_pair = TF.fmapF (\(TupleF2 x _) -> x) results_pair
-    simOut_pair = TF.fmapF (\(TupleF2 _ x) -> x) results_pair
+    simIn_pair = PPa.map (\(TupleF2 x _) -> x) results_pair
+    simOut_pair = PPa.map (\(TupleF2 _ x) -> x) results_pair
   return (PS.SimBundle simIn_pair simOut_pair)
 
 mkSimOut ::

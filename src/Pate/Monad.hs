@@ -1531,7 +1531,7 @@ withPair :: PB.BlockPair arch -> EquivM sym arch a -> EquivM sym arch a
 withPair pPair f = do
   env <- CMR.ask
   let env' = env { envParentBlocks = pPair:envParentBlocks env }
-  let entryPair = TF.fmapF (\b -> PB.functionEntryToConcreteBlock (PB.blockFunctionEntry b)) pPair
+  let entryPair = PPa.map (\b -> PB.functionEntryToConcreteBlock (PB.blockFunctionEntry b)) pPair
   CMR.local (\_ -> env' & PME.envCtxL . PMC.currentFunc .~ entryPair) f
 
 -- | Emit a trace event to the frontend
@@ -1543,7 +1543,7 @@ traceBlockPair
   -> String
   -> EquivM sym arch ()
 traceBlockPair bp msg =
-  emitEvent (PE.ProofTraceEvent callStack (TF.fmapF (Const . PB.concreteAddress) bp) (T.pack msg))
+  emitEvent (PE.ProofTraceEvent callStack (PPa.map (Const . PB.concreteAddress) bp) (T.pack msg))
 
 -- | Emit a trace event to the frontend
 --
@@ -1554,7 +1554,7 @@ traceBundle
   -> String
   -> EquivM sym arch ()
 traceBundle bundle msg = do
-  let bp = TF.fmapF (Const . PB.concreteAddress . simInBlock) (simIn bundle)
+  let bp = PPa.map (Const . PB.concreteAddress . simInBlock) (simIn bundle)
   emitEvent (PE.ProofTraceEvent callStack bp (T.pack msg))
 
 fnTrace :: 

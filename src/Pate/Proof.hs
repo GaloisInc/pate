@@ -429,7 +429,7 @@ data BlockSliceRegOp sym tp where
 
 instance PEM.ExprMappable sym (BlockSliceRegOp sym tp) where
   mapExpr sym f regOp = BlockSliceRegOp
-    <$> TF.traverseF (PEM.mapExpr sym f) (slRegOpValues regOp)
+    <$> PPa.traverse (PEM.mapExpr sym f) (slRegOpValues regOp)
     <*> pure (slRegOpRepr regOp)
     <*> f (slRegOpEquiv regOp)
 
@@ -448,7 +448,7 @@ data BlockSliceMemOp sym w where
 
 instance PEM.ExprMappable sym (BlockSliceMemOp sym w) where
   mapExpr sym f memOp = BlockSliceMemOp
-    <$> TF.traverseF (\(Const x) -> Const <$> W4H.mapExprPtr sym f x) (slMemOpValues memOp)
+    <$> PPa.traverse (\(Const x) -> Const <$> W4H.mapExprPtr sym f x) (slMemOpValues memOp)
     <*> f (slMemOpEquiv memOp)
     <*> f (slMemOpCond memOp)
 
