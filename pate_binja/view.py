@@ -600,10 +600,12 @@ class PateTraceConstraintDialog(QDialog):
 
         self.cfarNode = cfarNode
 
-        self.traceVars = pate.extractTraceVars(self.cfarNode.equivalenceConditionTrace.trace_footprint)
+        self.traceVars = pate.extractTraceVars(self.cfarNode.equivalenceConditionTrace)
+        #print('trace vars:', self.traceVars)
 
         # Prune TraceVars with no symbolic_ident
         self.traceVars = [tv for tv in self.traceVars if tv.symbolic_ident is not None]
+        #print('trace vars pruned:', self.traceVars)
 
         #self.resize(1500, 800)
         self.setWindowTitle("Trace Constraint")

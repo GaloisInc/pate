@@ -367,11 +367,13 @@ class PateWrapper:
                             eqCond = ConditionTrace(ccontent)
                             match this:
                                 case 'Asserted':
+                                    #print('Found asserted cond for ', cfar_parent.id)
                                     if cfar_parent.assertedConditionTrace:
                                         cfar_parent.assertedConditionTrace.update(ccontent)
                                     else:
                                         cfar_parent.assertedConditionTrace = ConditionTrace(ccontent)
                                 case 'Equivalence Condition Assumed':
+                                    #print('Found assumed cond for ', cfar_parent.id)
                                     if cfar_parent.assumedConditionTrace:
                                         cfar_parent.assumedConditionTrace.update(ccontent)
                                     else:
@@ -731,6 +733,9 @@ class ConditionTrace:
         self.trace_false = None
         self.trace_footprint = None
         self.update(raw)
+        # Debug stub
+        # vars = extractTraceVars(self)
+        # pass
 
     def update(self, raw:dict, traceConstraints: Optional[list[tuple[TraceVar, str, str]]] = None):
         self.traceConstraints = traceConstraints
@@ -991,13 +996,17 @@ def traceConstraintsJSONObjectHook(d: dict):
         return d
 
 
-def extractTraceVars(rawFootprint) -> list[TraceVar]:
+def extractTraceVars(condition: ConditionTrace) -> list[TraceVar]:
+    footprint = condition.trace_footprint
+    pprint.pprint(condition.trace_footprint)
     traceVars = []
-    #for r in raw['fp_initial_regs']['reg_op']['map']:
-    #   traceVars.append(TraceVar('reg_op', r))
-    for r in rawFootprint['original']['fp_mem']:
+    # for r in footprint['original']['fp_initial_regs']['reg_op']['map']:
+    #     traceVars.append(TraceVar('original', 'reg_op', r))
+    for r in footprint['original']['fp_mem']:
         traceVars.append(TraceVar('original', 'mem_op', r))
-    for r in rawFootprint['patched']['fp_mem']:
+    # for r in footprint['patched']['fp_initial_regs']['reg_op']['map']:
+    #     traceVars.append(TraceVar('patched', 'reg_op', r))
+    for r in footprint['patched']['fp_mem']:
         traceVars.append(TraceVar('patched', 'mem_op', r))
     # TODO: sort by instruction addr, but reverse seems to work for now
     traceVars.reverse()
@@ -1682,7 +1691,7 @@ def simplify_sexp(sexp, env=None):
     op = sexp[0]
     arg = list(map(lambda x: simplify_sexp(x, env), sexp[1:]))
 
-    # ('_', 'extract', s, e)(n) => n<s,e> 
+    # ('_', 'extract', s, e)(n) => n<s,e>
     if (isinstance(op, list) and len(op) == 4 and op[0] == '_' and op[1] == 'extract'
             and len(arg) == 1 and isinstance(arg[0], str)):
         return f'{arg[0]}<{op[2]}:{op[3]}>'
