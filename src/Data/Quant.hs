@@ -54,9 +54,11 @@ module Data.Quant
     , toQuantExists
     , quantToRepr
     , QuantRepr(..)
-    , ToQuant(..)
+    , QuantConversion(..)
+    , QuantConvertible(..)
+    , QuantCoercion(..)
+    , QuantCoercible(..)
     , HasReprK(..)
-    , ToMaybeQuant(..)
     , pattern QuantToOne
     , generateAll
     , generateAllM
@@ -285,45 +287,101 @@ instance (HasReprK k, forall x. Eq (f x)) => Eq (Quant (f :: k -> Type) tp) wher
 instance (HasReprK k, forall x. Ord (f x)) => Ord (Quant (f :: k -> Type) tp) where
     compare q1 q2 = toOrdering $ compareF q1 q2
 
+data QuantCoercion (t1 :: QuantK k) (t2 :: QuantK k) where
+    CoerceAllToOne :: ReprOf x -> QuantCoercion AllK (OneK x)
+    CoerceAllToExists :: QuantCoercion AllK ExistsK
+    CoerceOneToExists :: QuantCoercion (OneK x) ExistsK
+    CoerceRefl :: QuantCoercion x x
 
--- Defining which conversions are always possible
-class ToQuant f (t1 :: QuantK k) (t2 :: QuantK k) where
-    toQuant :: QuantRepr t2  -> f t1 -> f t2
+class QuantCoercible (f :: QuantK k -> Type)  where
+    applyQuantCoercion :: forall t1 t2. HasReprK k => QuantCoercion t1 t2 -> f t1 -> f t2
+    applyQuantCoercion qc f1 = withRepr qc $ coerceQuant f1
 
--- Can take a universally quantified variant to any variant
-instance HasReprK k => ToQuant (Quant f) AllK (tp :: QuantK k) where
-    toQuant repr z@(QuantAll f) = case repr of
-        QuantOneRepr baserepr -> QuantOne baserepr (TMF.apply f baserepr)
-        QuantAllRepr -> QuantAll f
-        QuantSomeRepr -> QuantSome z
+    coerceQuant :: forall t1 t2. (HasReprK k, KnownCoercion t1 t2) => f t1 -> f t2
+    coerceQuant = applyQuantCoercion knownRepr
 
--- Can take any variant to an existentially quantified variant
-instance ToQuant (Quant f) (tp :: QuantK k) ExistsK where
-    toQuant _ z = case z of
-        QuantSome{} -> z
-        _ -> QuantSome z
+instance HasReprK k => IsRepr (QuantCoercion (t1 :: QuantK k)) where
+    withRepr x f = case x of
+        CoerceAllToOne repr -> withRepr repr $ f
+        CoerceAllToExists -> f
+        CoerceOneToExists -> f
+        CoerceRefl -> f
 
--- Can always take a variant to the same kind
-instance ToQuant f (OneK k1) (OneK k1) where 
-    toQuant _ x = x
+instance QuantCoercible (Quant (f :: k -> Type)) where
+    applyQuantCoercion qc q = case (qc, q) of
+        (CoerceAllToOne repr, QuantAll f) -> QuantOne repr (TMF.apply f repr)
+        (CoerceAllToExists, QuantAll{}) -> QuantAny q
+        (CoerceOneToExists, QuantOne{}) -> QuantExists q
+        (CoerceRefl, _) -> q
 
-class ToMaybeQuant f (t1 :: QuantK k) (t2 :: QuantK k) where
-    toMaybeQuant :: QuantRepr t2 -> f t1 -> Maybe (f t2)
+type KnownCoercion (tp1 :: QuantK k) (tp2 :: QuantK k) = KnownRepr (QuantCoercion tp1) tp2
 
-instance HasReprK k => ToMaybeQuant (Quant f) (tp1 :: QuantK k) (tp2 :: QuantK k) where
-    toMaybeQuant repr x = case (x, repr) of
-        (QuantAll{}, _) -> Just (toQuant repr x)
-        (_, QuantSomeRepr) -> Just (toQuant repr x)
-        (QuantOne baseX x', QuantOneRepr baseY) -> case testEquality baseX baseY of
-            Just Refl -> Just $ QuantOne baseX x'
-            -- by definition we can't convert between base types
+
+instance (KnownRepr (ReprOf :: k -> Type) (x :: k)) => KnownRepr (QuantCoercion AllK) (OneK x) where
+    knownRepr = CoerceAllToOne knownRepr
+
+instance KnownRepr (QuantCoercion AllK) ExistsK where
+    knownRepr = CoerceAllToExists
+
+instance KnownRepr (QuantCoercion (OneK x)) ExistsK where
+    knownRepr = CoerceOneToExists
+
+instance KnownRepr (QuantCoercion x) x where
+    knownRepr = CoerceRefl
+
+
+data QuantConversion (t1 :: QuantK k) (t2 :: QuantK k) where
+    ConvertWithCoerce :: QuantCoercion t1 t2 -> QuantConversion t1 t2
+    ConvertExistsToAll :: QuantConversion ExistsK AllK
+    ConvertExistsToOne :: ReprOf x -> QuantConversion ExistsK (OneK x)
+
+instance HasReprK k => IsRepr (QuantConversion (t1 :: QuantK k)) where
+    withRepr x f = case x of
+        ConvertWithCoerce y -> case y of
+            CoerceAllToOne repr -> withRepr repr $ f
+            CoerceAllToExists -> f
+            CoerceOneToExists -> f
+            CoerceRefl -> f
+        ConvertExistsToAll -> f
+        ConvertExistsToOne repr -> withRepr repr $ f
+
+class QuantConvertible (f :: QuantK k -> Type)  where
+    applyQuantConversion :: forall t1 t2. HasReprK k => QuantConversion t1 t2 -> f t1 -> Maybe (f t2)
+    applyQuantConversion qc f1 = withRepr qc $ convertQuant f1
+
+    convertQuant :: forall t1 t2. (HasReprK k, KnownConversion t1 t2) => f t1 -> Maybe (f t2)
+    convertQuant = applyQuantConversion knownRepr
+
+type KnownConversion (tp1 :: QuantK k) (tp2 :: QuantK k) = KnownRepr (QuantConversion tp1) tp2
+
+instance (KnownRepr (ReprOf :: k -> Type) (x :: k)) => KnownRepr (QuantConversion AllK) (OneK x) where
+    knownRepr = ConvertWithCoerce knownRepr
+
+instance KnownRepr (QuantConversion AllK) ExistsK where
+    knownRepr = ConvertWithCoerce knownRepr
+
+instance KnownRepr (QuantConversion (OneK x)) ExistsK where
+    knownRepr = ConvertWithCoerce knownRepr
+
+instance KnownRepr (QuantConversion x) x where
+    knownRepr = ConvertWithCoerce knownRepr
+
+instance KnownRepr (QuantConversion ExistsK) AllK where
+    knownRepr = ConvertExistsToAll
+
+instance (KnownRepr (ReprOf :: k -> Type) (x :: k)) => KnownRepr (QuantConversion ExistsK) (OneK x) where
+    knownRepr = ConvertExistsToOne knownRepr
+
+
+instance QuantConvertible (Quant (f :: k -> Type)) where
+    applyQuantConversion qc q = case (qc, q) of
+        (ConvertWithCoerce qc', _) -> Just (applyQuantCoercion qc' q)
+        (ConvertExistsToAll, QuantAny q') -> Just q'
+        (ConvertExistsToAll, QuantExists{}) -> Nothing
+        (ConvertExistsToOne repr, QuantAny q') -> Just (applyQuantCoercion (CoerceAllToOne repr) q')
+        (ConvertExistsToOne repr, QuantExists q'@(QuantOne repr' _)) -> case testEquality repr repr' of
+            Just Refl -> Just q'
             Nothing -> Nothing
-        (QuantSome x', _) -> toMaybeQuant repr x'
-        -- by definition a base type cannot be turned into a universal quantifier
-        (QuantOne{}, QuantAllRepr) -> Nothing
-        -- in general we could consider types that themselves have defined conversions between
-        -- their type parameters (i.e nested Quants), but this level of generalization seems excessive without
-        -- good reason
 
 type family TheOneK (tp :: QuantK k) :: k where
     TheOneK (OneK k) = k

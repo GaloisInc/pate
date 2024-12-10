@@ -136,8 +136,8 @@ instance (forall x. Ord (f x)) => OrdF (NodeContent arch f) where
 type NodeEntry' arch = NodeContent arch (PB.ConcreteBlock arch)
 type NodeEntry arch = NodeEntry' arch ExistsK
 
-instance Qu.ToQuant (Quant (PB.ConcreteBlock arch)) q q' => Qu.ToQuant (NodeEntry' arch) q q' where
-  toQuant f (NodeEntry cctx blks) = NodeEntry cctx (Qu.toQuant f blks)
+instance Qu.QuantCoercible (NodeEntry' arch) where
+  coerceQuant (NodeEntry cctx blks) = NodeEntry cctx (Qu.coerceQuant blks)
 
 pattern NodeEntry :: CallingContext arch -> Quant (PB.ConcreteBlock arch) bin -> NodeEntry' arch bin
 pattern NodeEntry ctx bp = NodeContent ctx bp
@@ -168,8 +168,8 @@ pattern NodeReturn :: CallingContext arch -> Quant (PB.FunctionEntry arch) bin -
 pattern NodeReturn ctx bp = NodeContent ctx bp
 {-# COMPLETE NodeReturn #-}
 
-instance Qu.ToQuant (Quant (PB.FunctionEntry arch)) q q' => Qu.ToQuant (NodeReturn' arch) q q' where
-  toQuant f (NodeReturn cctx fns)  = NodeReturn cctx (Qu.toQuant f fns)
+instance Qu.QuantCoercible (NodeReturn' arch) where
+  coerceQuant (NodeReturn cctx fns) = NodeReturn cctx (Qu.coerceQuant fns)
 
 graphNodeBlocks :: GraphNode' arch bin -> Quant (PB.ConcreteBlock arch) bin
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
@@ -483,7 +483,7 @@ toSingleNodeEntry bin ne = do
     _ -> PPa.throwPairErr
 
 singleToNodeEntry :: SingleNodeEntry arch bin -> NodeEntry arch
-singleToNodeEntry sne = Qu.toQuant Qu.QuantSomeRepr sne
+singleToNodeEntry sne = Qu.coerceQuant sne
 
 singleNodeDivergence :: SingleNodeEntry arch bin -> GraphNode arch
 singleNodeDivergence (SingleNodeEntry cctx _) = case divergePoint cctx of
