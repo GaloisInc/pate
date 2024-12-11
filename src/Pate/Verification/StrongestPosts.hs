@@ -721,7 +721,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
   
   let dp = singleNodeDivergence sneO
   let syncNode = GraphNode syncNodeEntry
-  let snePair = PPa.PatchPair sneO sneP
+  let snePair = PPa.PatchPair (Qu.AsSingle sneO) (Qu.AsSingle sneP)
   let pre_refines = getDomainRefinements syncNode pg
 
   -- we start with two scopes: one representing the program state at the point of divergence: 'init_scope',
@@ -759,8 +759,8 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               
             (new_bind_asms, pg'') <- withPG pg' $ PPa.forBinsC $ \bin -> do
               sbundle <- PPa.get bin sbundlePair
-              sne <- PPa.get bin snePair
-              sne_other <- PPa.get (PBi.flipRepr bin) snePair
+              Qu.AsSingle sne <- PPa.get bin snePair
+              Qu.AsSingle sne_other <- PPa.get (PBi.flipRepr bin) snePair
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
               liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) nd syncNode ConditionAsserted pg_ >>= \case
@@ -784,7 +784,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
                   _ -> pg_
                 liftEqM_ $ \pg_ -> do
                   sbundle <- PPa.get bin sbundlePair
-                  sne <- PPa.get bin snePair
+                  Qu.AsSingle sne <- PPa.get bin snePair
                   let nd = GraphNode $ singleToNodeEntry sne
                   let scope = singleBundleScope sbundle
                   withConditionsAssumed scope (singleBundle sbundle) (singleBundleDomain sbundle) nd pg_ $
@@ -1174,19 +1174,19 @@ mergeBundles ::
   forall sym arch v_split v_merge.
   PS.SimScope sym arch v_split ->
   PS.SimScope sym arch v_merge ->
-  PPa.PatchPair (SingleNodeEntry arch) ->
+  PPa.PatchPair (Qu.AsSingle (NodeEntry' arch)) ->
   PairGraph sym arch ->
   EquivM sym arch (PPa.PatchPair (SingleBundle sym arch v_split v_merge), PairGraph sym arch)
 mergeBundles splitScope mergeScope snePair pg = withSym $ \sym -> withPG pg $ do
   PS.compositeScopeCases mergeScope splitScope $ \bin scope -> do
-    sne <- PPa.get bin snePair
+    Qu.AsSingle sne <- PPa.get bin snePair
     let dp = singleNodeDivergence sne
     let bin_other = PBi.flipRepr bin
     dpBlk <- PPa.get bin_other (graphNodeBlocks dp)
     let sneBlk = singleNodeBlock sne
     let blks = PPa.mkPair bin sneBlk dpBlk
     bundle <- lift $ noopBundle scope blks
-    sne_other <- PPa.get bin_other snePair
+    Qu.AsSingle sne_other <- PPa.get bin_other snePair
     (st_other,binds) <- liftEqM $ \pg_ -> liftIO $ initFnBindings sym mergeScope sne_other pg_
     output <- PPa.get bin_other (simOut bundle)
     PS.PopT output' <- return $ PS.fromGlobalScope $ PS.PopT (output { PS.simOutState = st_other })
