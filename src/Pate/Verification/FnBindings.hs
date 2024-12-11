@@ -27,15 +27,19 @@ module Pate.Verification.FnBindings
   ( FnBindings
   , FnBindingsSpec
   , init
+  , empty
   , merge
+  , mux
   , toScopedPred
   , toPred
   , addUsedFns
+  , toExprBindings
   ) where
 
 import           Prelude hiding (init)
 import           Control.Monad.Reader
 import           Control.Monad.Trans.State
+import           Control.Monad.Trans.Maybe
 import           Data.Functor.Identity
 
 import qualified Data.Parameterized.Context as Ctx
@@ -126,6 +130,10 @@ init ::
   IO (f PS.GlobalScope, FnBindings sym bin v)
 init sym e = runStateT (PS.scopedExprMap sym e (mkFreshFns sym)) (FnBindings MapF.empty Set.empty)
 
+empty :: FnBindings sym bin v
+empty = FnBindings MapF.empty Set.empty
+
+
 mkFreshFns ::
   W4.IsSymExprBuilder sym =>
   sym ->
@@ -140,10 +148,10 @@ mkFreshFns sym_ e_scoped = case W4.asConcrete (PS.unSE e_scoped) of
     modify $ \(FnBindings binds s) -> FnBindings (MapF.insert fn (PS.PopScope e_scoped) binds) s
     return e_global
 
--- | Merge the two given function bindings, muxing the individual bindings
+-- | Mux the two given function bindings, muxing the individual bindings
 --   with the given predicate (i.e. path condition) in the case of 
 --   key (uninterpreted function) clashes
-merge ::
+mux ::
   forall sym bin v.
   W4.IsSymExprBuilder sym =>
   sym ->
@@ -151,7 +159,7 @@ merge ::
   FnBindings sym bin v ->
   FnBindings sym bin v ->
   IO (FnBindings sym bin v)
-merge sym p (FnBindings binds1 s1) (FnBindings binds2 s2) = do
+mux sym p (FnBindings binds1 s1) (FnBindings binds2 s2) = do
   FnBindings <$> MapF.mergeWithKeyM go return return binds1 binds2 <*> (return $ Set.union s1 s2)
   where
     go :: forall tp.
@@ -163,6 +171,23 @@ merge sym p (FnBindings binds1 s1) (FnBindings binds2 s2) = do
       Just{} -> return $ Just (PS.PopScope e1)
       Nothing -> (Just . PS.PopScope) <$> (liftIO $ (PS.liftScope3 sym W4.baseTypeIte p e1 e2 ))
 
+merge ::
+  forall sym bin v.
+  W4.IsSymExprBuilder sym =>
+  FnBindings sym bin v ->
+  FnBindings sym bin v ->
+  Maybe (FnBindings sym bin v)
+merge (FnBindings binds1 s1) (FnBindings binds2 s2) =
+  FnBindings <$> MapF.mergeWithKeyM go return return binds1 binds2 <*> (return $ Set.union s1 s2)
+  where
+    go :: forall tp.
+        BoundFn sym tp ->
+        PS.PopScope (PS.ScopedExpr sym) v tp -> 
+        PS.PopScope (PS.ScopedExpr sym) v tp -> 
+        Maybe (Maybe (PS.PopScope (PS.ScopedExpr sym) v tp))
+    go _fn se1 se2 = case W4.testEquality se1 se2 of
+      Just{} -> return $ Just se1
+      Nothing -> fail "FnBindings: key mismatch"
 
 toScopedPred ::
   forall sym bin v.
@@ -192,7 +217,14 @@ toPred ::
   IO (W4.Pred sym)
 toPred sym binds = PS.unSE <$> toScopedPred sym binds
 
+type ExprBindings sym = MapF.MapF (W4.SymExpr sym) (W4.SymExpr sym)
 
+toExprBindings ::
+  W4.IsSymExprBuilder sym =>
+  FnBindings sym bin v ->
+  ExprBindings sym
+toExprBindings binds = 
+  MapF.fromList $ map (\(MapF.Pair (BoundFn e) (PS.PopScope se)) -> MapF.Pair e (PS.unSE se)) $ MapF.toList (fnBindings binds)
 
 -- Note we don't require that 'f' has the same scope as
 -- the bindings, since we can collect used bindings from any scope

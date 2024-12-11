@@ -33,6 +33,7 @@ module Pate.Monad.PairGraph
   , runPG
   , execPG
   , liftPartEqM_
+  , lookupFnBindings
   ) where
 
 import           Control.Monad.State.Strict
@@ -325,3 +326,14 @@ runPendingActions lens edge result pg0 = do
   case didchange of
     True -> return $ Just pg1
     False -> return Nothing
+
+lookupFnBindings ::
+  PS.SimScope sym arch v ->
+  SingleNodeEntry arch bin ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PFn.FnBindings sym bin v))
+lookupFnBindings scope sne pg = withSym $ \sym -> case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+  Just (PS.AbsT bindsSpec) -> Just <$> (IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec)
+  Nothing -> return Nothing
+  where
+    dp = singleNodeDivergePoint sne

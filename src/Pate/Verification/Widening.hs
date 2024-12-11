@@ -810,6 +810,68 @@ isEqCondSingleSided scope blks bin eqCond = withSym $ \sym -> do
     conds_eq <- liftIO $ W4.isEq sym eqCond_pred eqCond2_pred
     isPredTrue' goalTimeout conds_eq
 
+-- FIXME: the scope of the path condition isn't explicitly
+-- maintained, so we assume it here.
+-- We could check if the predicate is well-scoped
+scopedPathCondition ::
+  PS.SimScope sym arch v ->
+  EquivM sym arch (PS.ScopedExpr sym W4.BaseBoolType v)
+scopedPathCondition _scope = withSym $ \sym -> do
+  pathCond <- CMR.asks envPathCondition >>= PAs.toPred sym
+  Some scopedPathCond <- return $ PS.mkScopedExpr pathCond
+  return $ PS.unsafeCoerceScope scopedPathCond
+
+propagateBindings ::
+  forall sym arch v.
+  PS.SimScope sym arch v ->
+  SimBundle sym arch v ->
+  GraphNode arch {- ^ from -} ->
+  GraphNode arch {- ^ to -} ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PairGraph sym arch))
+propagateBindings scope bundle from to gr0 = withSym $ \sym -> case (from,to) of
+  (GraphNode fromE, GraphNode toE)
+    | Just (Some fromSNE) <- asSingleNodeEntry fromE
+    , Just  (Some toSNE) <- asSingleNodeEntry toE
+    -- nodes are both single-sided and the same side
+    , Just Refl <- testEquality (singleEntryBin fromSNE) (singleEntryBin toSNE)
+    -- nodes have the same divergence point
+    , fromDP <- singleNodeDivergePoint fromSNE
+    , dp <- singleNodeDivergePoint toSNE
+    , fromDP == dp
+    -- 'to' node has defined bindings that need to be propagated
+    , Just (PS.AbsT toBindsSpec) <- MapF.lookup toSNE (gr0 ^. (syncData dp . syncBindings))
+    -> do
+      let outVars = PS.bundleOutVars scope bundle
+      toBinds <- liftIO $ PS.bindSpec sym outVars toBindsSpec
+      lookupFnBindings scope fromSNE gr0 >>= \case
+        -- 'from' has existing binds so we check if we actually need to propagate
+        -- FIXME: can we check this without the solver? do we need to check it?
+        Just fromBinds -> do
+          emitTrace @"debug" "Propagating and merging with existing bindings"
+          fromBindsPred <- IO.liftIO $ PFn.toPred sym fromBinds
+          withAssumption fromBindsPred $ do
+            toBindsPred <- IO.liftIO $ PFn.toPred sym toBinds
+            not_toBindsPred <- liftIO $ W4.notPred sym toBindsPred
+            goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+            isPredSat' goalTimeout not_toBindsPred >>= \case
+              Just False -> do
+                emitTraceLabel @"expr" (ExprLabel $ "Proved bindings") (Some toBindsPred)
+                return Nothing
+              _ -> do
+                -- FIXME: use 'addFnBindings' instead? needs to take a mux condition
+                pathCond <- scopedPathCondition scope
+                bindsCombined <- IO.liftIO $ PFn.mux sym pathCond toBinds fromBinds
+                return $ Just $ gr0 & (syncData dp . syncBindings) %~ MapF.insert fromSNE (PS.AbsT $ PS.mkSimSpec scope bindsCombined)
+        -- 'from' has no binds so we propagate unconditionally
+        Nothing -> do
+          -- FIXME: do we care about the path condition here?
+          emitTrace @"debug" "Propagating bindings"
+          return $ Just $ gr0 & (syncData dp . syncBindings) %~ MapF.insert fromSNE (PS.AbsT $ PS.mkSimSpec scope toBinds)
+  _ -> do
+    emitTrace @"debug" "No bindings to propagate"
+    return Nothing
+
 -- | Propagate the given condition kind backwards (from 'to' node to 'from' node).
 --   Does not do any other graph maintenance (i.e. dropping stale domains or re-queuing nodes)
 propagateOne ::
@@ -873,10 +935,16 @@ propagateCondition scope bundle from to gr0_ = fnTrace "propagateCondition" $ do
   (upd1, gr1) <- maybeUpdate' gr0_ $ go ConditionAsserted gr0_
   (upd2, gr2) <- maybeUpdate' gr1 $ go ConditionAssumed gr1
   (upd3, gr3) <- maybeUpdate' gr2 $ go ConditionEquiv gr2
-  case upd1 || upd2 || upd3 of
+  (upd4, gr4) <- maybeUpdate' gr3 $ propagateBindings scope bundle from to gr3  >>= \case
+    Nothing -> return Nothing
+    Just gr' -> do
+      priority <- thisPriority
+      return $ Just $ queueAncestors (priority PriorityPropagation) from (markEdge from to gr')
+  case upd1 || upd2 || upd3 || upd4 of
     False -> return Nothing
-    True -> return $ Just gr3
+    True -> return $ Just gr4
   where
+    
     go condK gr = propagateOne scope bundle from to condK gr >>= \case
       Nothing -> return Nothing
       Just gr' -> do
@@ -951,6 +1019,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
               md <- widenPostcondition scope bundle d d'
               case md of
                 NoWideningRequired -> do
+                  emitTrace @"debug" "NoWideningRequired"
                   emitTraceLabel @"domain" PAD.Postdomain (Some d')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d'
                   let gr1 = initDomain gr from to (priority PriorityWidening) postSpec'
@@ -960,7 +1029,8 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                      err <- emitError' (PEE.WideningError msg')
                      postSpec' <- abstractOverVars scope bundle from to postSpec d''
                      return $ recordMiscAnalysisError (initDomain gr from to (priority PriorityWidening) postSpec') to err
-                Widen _ _ d'' -> do
+                Widen wk _ d'' -> do
+                  emitTrace @"debug" (show wk)
                   emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                   postSpec' <- abstractOverVars scope bundle from to postSpec d''
                   let gr1 = initDomain gr from to (priority PriorityWidening) postSpec'
@@ -986,6 +1056,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
             md <- widenPostcondition scope bundle d d'
             case md of
               NoWideningRequired -> do
+                emitTrace @"debug" "NoWideningRequired"
                 traceBundle bundle "Did not need to widen"
                 emitTraceLabel @"domain" PAD.Postdomain (Some d')
                 finalizeGraphEdge scope bundle d d' from to gr
@@ -1000,7 +1071,8 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
                     return $ recordMiscAnalysisError gr' to err
                   Right gr' -> return $ recordMiscAnalysisError gr' to err
 
-              Widen _ _ d'' -> do
+              Widen wk _ d'' -> do
+                emitTrace @"debug" (show wk)
                 emitTraceLabel @"domain" PAD.Postdomain (Some d'')
                 postSpec' <- abstractOverVars scope bundle from to postSpec d''
                 case updateDomain gr from to postSpec' (priority PriorityWidening) of

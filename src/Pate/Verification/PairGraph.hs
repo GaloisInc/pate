@@ -137,6 +137,7 @@ module Pate.Verification.PairGraph
   , setPropagationKind
   , initFnBindings
   , addFnBindings
+  , getAllSyncPoints
   ) where
 
 import           Prettyprinter
@@ -529,30 +530,30 @@ getSingleNodeData ::
   HasCallStack =>
   (OrdF x, Ord (x bin)) =>
   L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
-  SingleGraphNode arch bin ->
+  SingleNodeEntry arch bin ->
   PairGraphM sym arch (Set (x bin))
-getSingleNodeData lens sgn =
-  getPG $ syncDataSet (singleNodeDivergePoint sgn) (singleNodeRepr sgn) lens
+getSingleNodeData lens sne =
+  getPG $ syncDataSet (singleNodeDivergePoint sne) (singleEntryBin sne) lens
 
 addFnBindings ::
   sym ~ W4B.ExprBuilder s st fs =>
   PA.ValidArch arch =>
   sym ->
   PS.SimScope sym arch v ->
-  SingleGraphNode arch bin ->
+  SingleNodeEntry arch bin ->
   PFn.FnBindings sym bin v ->
   PairGraph sym arch ->
   IO (PFn.FnBindings sym bin v, PairGraph sym arch)
-addFnBindings sym scope sne binds pg = case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncBindings)) of
+addFnBindings sym scope sne binds pg = case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
   Just (PS.AbsT bindsSpec_prev) -> do
     binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
-    -- FIXME: check for clashes?
-    true_ <- PS.concreteScope sym (W4.ConcreteBool True)
-    binds' <- PFn.merge sym true_ binds binds_prev
-    return $ (binds', pg & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle sne) (PS.AbsT $ PS.mkSimSpec scope binds'))
-  Nothing -> return $ (binds, pg & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle sne) (PS.AbsT $ PS.mkSimSpec scope binds))
+    binds' <- case PFn.merge binds binds_prev of
+      Just binds' -> return binds'
+      Nothing -> fail "addFnBindings: unexpected binding clash"
+    return $ (binds', pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds'))
+  Nothing -> return $ (binds, pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds))
   where
-    dp = singleNodeDivergePoint sne
+    dp = singleNodeDivergence sne
 
 
 -- | Retrieve the final state that binds the given scope to instead be
@@ -565,26 +566,26 @@ initFnBindings ::
   PA.ValidArch arch =>
   sym ->
   PS.SimScope sym arch v ->
-  SingleGraphNode arch bin ->
+  SingleNodeEntry arch bin ->
   PairGraph sym arch ->
   IO ((PS.SimState sym arch PS.GlobalScope bin, PFn.FnBindings sym bin v), PairGraph sym arch)
 initFnBindings sym scope sne pg = do
-  case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncStates)) of
+  case MapF.lookup sne (pg ^. (syncData dp . syncStates)) of
     -- if we already have a 'syncState' entry, then we should re-use those
     -- uninterpreted functions rather than making new ones
-    Just st_global -> case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncBindings)) of
+    Just st_global -> case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
       Just (PS.AbsT bindsSpec_prev) -> do
         binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
         return ((st_global, binds_prev), pg)
       Nothing -> fail $ "Missing binding information for node: " ++ show sne
     Nothing -> do
       (PS.PopT st_global, binds) <- PFn.init sym (PS.PopT st)
-      let pg' = pg & (syncData dp . syncStates) %~ MapF.insert (Qu.AsSingle sne) st_global
+      let pg' = pg & (syncData dp . syncStates) %~ MapF.insert sne st_global
       (binds', pg'') <- addFnBindings sym scope sne binds pg'
       return $ ((st_global, binds'), pg'')
   where
-    dp = singleNodeDivergePoint sne
-    bin = singleNodeRepr sne
+    dp = singleNodeDivergence sne
+    bin = singleEntryBin sne
 
     st :: PS.SimState sym arch v bin
     st = PS.simVarState $ case bin of
@@ -673,6 +674,17 @@ handleKnownDesync priority ne blkt = fmap (fromMaybe False) $ tryPG $ do
       queueSplitAnalysis (priority PriorityHandleDesync) ne
       return True
     False -> return False
+
+-- | Queue all the sync points to be processed (merged) for a given
+--   divergence
+getAllSyncPoints ::
+  GraphNode arch ->
+  PairGraphM sym arch [PPa.PatchPair (SyncPoint arch)]
+getAllSyncPoints nd = do
+  syncsO <- getSyncData syncPoints PBi.OriginalRepr nd
+  syncsP <- getSyncData syncPoints PBi.PatchedRepr nd
+  forM (Set.toList (Set.cartesianProduct syncsO syncsP)) $ \(sO,sP) -> do
+    return $ PPa.PatchPair sO sP
 
 -- | Combine two single-sided nodes into a 'WorkItem' to process their
 --   merge. Returns 'Nothing' if the two single-sided nodes have different

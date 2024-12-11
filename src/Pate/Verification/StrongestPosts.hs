@@ -597,12 +597,48 @@ initSingleSidedDomain sne pg0 = withPG_ pg0 $ do
         let dom_single_spec = PS.mkSimSpec scope dom_single
         liftPG $ modify $ \pg -> initDomain pg nd nd_single (priority PriorityHandleDesync) dom_single_spec
     -}
+    sne_other <- toSingleNodeEntry (PBi.flipRepr bin) ne
+    
     bundle <- lift $ noopBundle scope (graphNodeBlocks nd)
-    liftEqM_ $ \pg -> do
-      pr <- currentPriority
-      atPriority (raisePriority pr) (Just "Starting Split Analysis") $
-        withGraphNode' scope nd bundle dom pg $ 
-          widenAlongEdge scope bundle nd dom_single pg nd_single
+    mbindsThis <- lift $ lookupFnBindings scope sne pg0
+    mbindsOther <- lift $ lookupFnBindings scope sne_other pg0
+
+
+
+    let do_widen pg = do
+          pr <- currentPriority
+          atPriority (raisePriority pr) (Just "Starting Split Analysis") $
+            withGraphNode' scope nd bundle dom pg $ 
+              widenAlongEdge scope bundle nd dom_single pg nd_single
+    
+    let rewrite_assert exprBinds pg = case getCondition pg nd ConditionAsserted of
+          Just condSpec -> do
+            cond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
+            cond' <- PSi.applySimpStrategy (PSi.rewriteStrategy exprBinds) cond
+            let condSpec' = PS.mkSimSpec scope cond'
+            return $ setCondition nd ConditionAsserted PropagateFull condSpec' pg
+          Nothing -> return pg
+          
+    case (mbindsThis, mbindsOther) of
+
+      (Just bindsThis, Just bindsOther) -> do
+        binds <- IO.liftIO $ WEH.mergeBindings sym (PFn.toExprBindings bindsThis) (PFn.toExprBindings bindsOther) 
+        liftEqM_ $ \pg -> (withAssumptionSet (PAS.fromExprBindings binds) $ do_widen pg) >>= rewrite_assert binds
+      (Just{}, Nothing) -> do
+        pr <- lift $ currentPriority
+        -- Should we lower the priority here? Is it possible to get caught in a loop otherwise?
+        -- Formally we should be able to find all relevant nodes based on which bindings
+        -- we're missing
+        liftPG $ getAllSyncPoints nd >>= \syncs -> forM_ syncs $ \syncPair -> do
+          sp <- PPa.get (PBi.flipRepr bin) syncPair
+          modify $ queueAncestors pr (GraphNode $ singleToNodeEntry (syncPointNode sp))
+ 
+      (Nothing, Just bindsOther) -> do
+        let binds = PFn.toExprBindings bindsOther
+        liftEqM_ $ \pg -> 
+          (withAssumptionSet (PAS.fromExprBindings binds) $ do_widen pg) >>= rewrite_assert binds
+      (Nothing, Nothing) -> liftEqM_ do_widen
+    
     return (PS.WithScope ())
 
 withGraphNode' ::
@@ -1448,8 +1484,18 @@ withConditionsAssumed ::
   EquivM_ sym arch (PairGraph sym arch) ->
   EquivM sym arch (PairGraph sym arch)
 withConditionsAssumed scope bundle d node gr0 f = do
-  foldr go f [minBound..maxBound]
+  foldr go f' [minBound..maxBound]
   where 
+    f' = withSym $ \sym -> case node of
+      GraphNode ne | Just (Some sne) <- asSingleNodeEntry ne -> 
+        lookupFnBindings scope sne gr0 >>= \case
+          Just binds -> do
+            bindsPred <- IO.liftIO $ PFn.toPred sym binds
+            emitTraceLabel @"expr" "Bindings" (Some bindsPred)
+            withAssumption bindsPred $ f
+          Nothing -> f
+      _ -> f
+
     go condK g =
       withSatConditionAssumed scope bundle d node condK gr0 g
 
