@@ -645,15 +645,12 @@ class PateTraceConstraintDialog(QDialog):
         removeButton = QPushButton("Remove Selected")
         removeButton.clicked.connect(lambda _: self.removeSelectedConstraints())
 
-        cancelButton = QPushButton("Cancel")
-        cancelButton.clicked.connect(lambda _: self.cancel())
-
-        applyButton = QPushButton("Apply")
-        applyButton.clicked.connect(lambda _: self.apply())
-
         buttonBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttonBox.accepted.connect(self.accept)
         buttonBox.rejected.connect(self.reject)
+        self.okButton = buttonBox.button(QDialogButtonBox.Ok)
+        self.cancelButton = buttonBox.button(QDialogButtonBox.Cancel)
+        self.okButton.setEnabled(False)  # Enabled when at least one constraint
 
         # Main Layout
         main_layout = QVBoxLayout()
@@ -662,6 +659,16 @@ class PateTraceConstraintDialog(QDialog):
         main_layout.addWidget(removeButton)
         main_layout.addWidget(buttonBox)
         self.setLayout(main_layout)
+
+        if len(self.traceVars) == 0:
+            # No vars to constrain, disable everything except cancel button
+            QListWidgetItem('No variables available to constrain.', self.constraintList)
+            self.relComboBox.setEnabled(False)
+            self.intTextLine.setEnabled(False)
+            removeButton.setEnabled(False)
+            addButton.setEnabled(False)
+            self.okButton.setEnabled(False)
+            self.constraintList.setEnabled(False)
 
     def addConstraint(self):
         var = self.varComboBox.currentText()
@@ -685,6 +692,8 @@ class PateTraceConstraintDialog(QDialog):
         item = QListWidgetItem(constraint, self.constraintList)
         item.setData(Qt.UserRole, (traceVar, rel, intVal))
 
+        self.okButton.setEnabled(self.constraintList.count() > 0)
+
     def removeSelectedConstraints(self):
         clist = self.constraintList
         listItems = clist.selectedItems()
@@ -692,6 +701,9 @@ class PateTraceConstraintDialog(QDialog):
         for item in listItems:
             itemRow = clist.row(item)
             clist.takeItem(itemRow)
+
+        self.okButton.setEnabled(self.constraintList.count() > 0)
+
 
     def getConstraints(self) -> list[tuple[pate.TraceVar, str, str]]:
         lw = self.constraintList
