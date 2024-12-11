@@ -63,12 +63,14 @@ module Pate.Verification.PairGraph.Node (
   , singleToNodeEntry
   , singleNodeBlock
   , combineSingleEntries
-  , singleNodeDivergence
   , toSingleNodeEntry
   , singleNodeAddr
   , SingleNodeReturn
   , SingleGraphNode
   , pattern SingleNodeReturn
+  , singleNodeRepr
+  , singleNodeDivergePoint
+  , singleNodeDivergence
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )
@@ -108,6 +110,18 @@ data GraphNode' arch (bin :: QuantK PB.WhichBinary)
  deriving (Eq, Ord)
 
 type GraphNode arch = GraphNode' arch ExistsK
+
+instance TestEquality (GraphNode' arch) where
+  testEquality nd1 nd2 | Just Refl <- testEquality (nodeRepr nd1) (nodeRepr nd2), nd1 == nd2 = Just Refl
+  testEquality _ _ = Nothing
+
+instance OrdF (GraphNode' arch) where
+  compareF nd1 nd2 = lexCompareF (nodeRepr nd1) (nodeRepr nd2) $ fromOrdering $ compare nd1 nd2
+
+instance Qu.QuantCoercible (GraphNode' arch) where
+  coerceQuant = \case
+    GraphNode ne -> GraphNode (Qu.coerceQuant ne)
+    ReturnNode nr -> ReturnNode (Qu.coerceQuant nr)
 
 instance PA.ValidArch arch => JSON.ToJSON (GraphNode' arch bin) where
   toJSON = \case
@@ -161,6 +175,10 @@ nodeReturnRepr ne = Qu.quantToRepr $ nodeFuns ne
 nodeFuns :: NodeReturn' arch bin -> Quant (PB.FunctionEntry arch) bin
 nodeFuns = nodeContent
 
+nodeRepr :: GraphNode' arch qbin -> Qu.QuantRepr qbin
+nodeRepr (GraphNode ne) = nodeEntryRepr ne
+nodeRepr (ReturnNode rn) = nodeReturnRepr rn
+
 returnNodeContext :: NodeReturn' arch bin -> CallingContext arch
 returnNodeContext = nodeContentCtx
 
@@ -175,7 +193,7 @@ graphNodeBlocks :: GraphNode' arch bin -> Quant (PB.ConcreteBlock arch) bin
 graphNodeBlocks (GraphNode ne) = nodeBlocks ne
 graphNodeBlocks (ReturnNode ret) = Qu.map PB.functionEntryToConcreteBlock (nodeFuns ret)
 
-nodeContext :: GraphNode arch -> CallingContext arch
+nodeContext :: GraphNode' arch qbin  -> CallingContext arch
 nodeContext (GraphNode nd) = nodeContentCtx nd
 nodeContext (ReturnNode ret) = nodeContentCtx ret
 
@@ -359,19 +377,19 @@ instance PA.ValidArch arch => Pretty (NodeEntry' arch bin) where
     False -> PB.ppBinaryPair' PB.ppBlockAddr (nodeBlocks e)
       <+> "[" <+> pretty (graphNodeContext (addContext (nodeBlocks (functionEntryOf e)) e)) <+> "]"
 
-instance PA.ValidArch arch => Pretty (NodeReturn arch) where
+instance PA.ValidArch arch => Pretty (NodeReturn' arch qbin) where
   pretty e = case returnNodeContext e of
     CallingContext [] _ -> pretty (nodeFuns e)
     _ -> pretty (nodeFuns e) <+> "[" <+> pretty (returnNodeContext e) <+> "]"
 
-instance PA.ValidArch arch => Show (NodeReturn arch) where
+instance PA.ValidArch arch => Show (NodeReturn' arch qbin) where
   show e = show (pretty e)
 
-instance PA.ValidArch arch => Pretty (GraphNode arch) where
+instance PA.ValidArch arch => Pretty (GraphNode' arch qbin) where
   pretty (GraphNode e) = "GraphNode" <+> pretty e
   pretty (ReturnNode e) = "ReturnNode" <+> pretty e
 
-instance PA.ValidArch arch => Show (GraphNode arch) where
+instance PA.ValidArch arch => Show (GraphNode' arch qbin) where
   show e = show (pretty e)
 
 tracePrettyNode ::
@@ -451,10 +469,15 @@ mkSingleNodeEntry :: NodeEntry' arch qbin -> PB.ConcreteBlock arch bin -> Single
 mkSingleNodeEntry node blk = SingleNodeEntry (graphNodeContext node) blk
 
 
-singleNodeDivergePoint :: SingleNodeEntry arch bin -> GraphNode arch
-singleNodeDivergePoint (NodeEntry cctx _) = case divergePoint cctx of
+singleNodeDivergePoint :: SingleGraphNode arch bin -> GraphNode arch
+singleNodeDivergePoint sgn = case divergePoint (nodeContext sgn) of
   Just dp -> dp
   Nothing -> panic Verifier "singleNodeDivergePoint" ["missing diverge point for SingleNodeEntry"]
+
+
+singleNodeDivergence :: SingleNodeEntry arch bin -> GraphNode arch
+singleNodeDivergence sne = singleNodeDivergePoint (GraphNode sne)
+
 
 asSingleNodeEntry :: PPa.PatchPairM m => NodeEntry' arch qbin -> m (Some (Qu.AsSingle (NodeEntry' arch)))
 asSingleNodeEntry (NodeEntry cctx blks) = do
@@ -485,10 +508,8 @@ toSingleNodeEntry bin ne = do
 singleToNodeEntry :: SingleNodeEntry arch bin -> NodeEntry arch
 singleToNodeEntry sne = Qu.coerceQuant sne
 
-singleNodeDivergence :: SingleNodeEntry arch bin -> GraphNode arch
-singleNodeDivergence (SingleNodeEntry cctx _) = case divergePoint cctx of
-  Just dp -> dp
-  Nothing -> panic Verifier "singleNodeDivergence" ["Unexpected missing divergence point"]
+singleToGraphNode :: SingleGraphNode arch bin -> GraphNode arch
+singleToGraphNode sgn = Qu.coerceQuant sgn
 
 combineSingleEntries' :: 
   SingleNodeEntry arch PB.Original -> 
@@ -522,3 +543,6 @@ pattern SingleNodeReturn cctx fn <- ((\l -> case l of NodeReturn cctx (Qu.Single
     SingleNodeReturn cctx fn = NodeReturn cctx (Qu.Single (PB.functionBinRepr fn) fn)
 
 type SingleGraphNode arch bin = GraphNode' arch (Qu.OneK bin)
+
+singleNodeRepr :: SingleGraphNode arch bin -> PB.WhichBinaryRepr bin
+singleNodeRepr sgn = case nodeRepr sgn of Qu.QuantOneRepr repr -> repr

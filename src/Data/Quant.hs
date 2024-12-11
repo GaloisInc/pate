@@ -64,7 +64,8 @@ module Data.Quant
     , generateAllM
     , pattern All
     , pattern Single
-    , viewQuantEach
+    , quantEach
+    , QuantEach
     , pattern QuantEach
     , AsSingle(..)
   ) where
@@ -508,8 +509,8 @@ instance forall f. ShowF f => ShowF (AsSingle f) where
 
 type QuantEach (f :: QuantK k -> Type) = Quant (AsSingle f) AllK
 
-viewQuantEach :: HasReprK k => QuantEach f -> (forall (x :: k). ReprOf x -> f (OneK x))
-viewQuantEach (QuantAll f) = \r -> case TMF.apply f r of AsSingle x -> x
+quantEach :: HasReprK k => QuantEach f -> (forall (x :: k). ReprOf x -> f (OneK x))
+quantEach (QuantAll f) = \r -> case TMF.apply f r of AsSingle x -> x
 
 viewQuantEach' :: HasReprK k => Quant (AsSingle f) tp -> Maybe (Dict (IsExistsOr tp AllK), forall (x :: k). ReprOf x -> f (OneK x))
 viewQuantEach' q = case q of

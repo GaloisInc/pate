@@ -625,7 +625,7 @@ handleProcessSplit ::
   PairGraph sym arch ->
   EquivM sym arch (Maybe (GraphNode arch), PairGraph sym arch)
 handleProcessSplit sne pg = withPG pg $ do
-  let divergeNode = singleNodeDivergePoint sne
+  let divergeNode = singleNodeDivergence sne
   priority <- lift $ thisPriority
   case getCurrentDomain pg divergeNode of
     Nothing -> do
@@ -645,7 +645,7 @@ handleProcessMerge sneO sneP pg = withPG pg $ do
   let
     ndO = GraphNode $ singleToNodeEntry sneO
     ndP = GraphNode $ singleToNodeEntry sneP
-    divergeNode = singleNodeDivergePoint sneO
+    divergeNode = singleNodeDivergence sneO
   priority <- lift $ thisPriority
   case getCurrentDomain pg divergeNode of
     Nothing -> do
@@ -721,7 +721,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
   
   let dp = singleNodeDivergence sneO
   let syncNode = GraphNode syncNodeEntry
-  let snePair = PPa.PatchPair (Qu.AsSingle sneO) (Qu.AsSingle sneP)
+  let snePair = Qu.QuantEach (\case PBi.OriginalRepr -> sneO; PBi.PatchedRepr -> sneP)
   let pre_refines = getDomainRefinements syncNode pg
 
   -- we start with two scopes: one representing the program state at the point of divergence: 'init_scope',
@@ -759,15 +759,15 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               
             (new_bind_asms, pg'') <- withPG pg' $ PPa.forBinsC $ \bin -> do
               sbundle <- PPa.get bin sbundlePair
-              Qu.AsSingle sne <- PPa.get bin snePair
-              Qu.AsSingle sne_other <- PPa.get (PBi.flipRepr bin) snePair
+              let sne = Qu.quantEach snePair bin
+              let sne_other = Qu.quantEach snePair (PBi.flipRepr bin) 
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
               liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) nd syncNode ConditionAsserted pg_ >>= \case
                 Just pg_' -> do
                   let binds_other = foldr (collectCondition bin nd pg_') (singleBundleBinds sbundle) [minBound .. maxBound]
                   priority <- thisPriority
-                  (binds, pg_'') <- IO.liftIO $ addFnBindings sym mergeScope sne_other binds_other pg_'
+                  (binds, pg_'') <- IO.liftIO $ addFnBindings sym mergeScope (GraphNode sne_other) binds_other pg_'
                   binds_asm <- IO.liftIO $ PFn.toPred sym binds
                   return $ (binds_asm, queueAncestors (priority PriorityHandleDesync) nd pg_'')
                 Nothing -> 
@@ -784,7 +784,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
                   _ -> pg_
                 liftEqM_ $ \pg_ -> do
                   sbundle <- PPa.get bin sbundlePair
-                  Qu.AsSingle sne <- PPa.get bin snePair
+                  let sne = Qu.quantEach snePair bin
                   let nd = GraphNode $ singleToNodeEntry sne
                   let scope = singleBundleScope sbundle
                   withConditionsAssumed scope (singleBundle sbundle) (singleBundleDomain sbundle) nd pg_ $
@@ -1174,20 +1174,20 @@ mergeBundles ::
   forall sym arch v_split v_merge.
   PS.SimScope sym arch v_split ->
   PS.SimScope sym arch v_merge ->
-  PPa.PatchPair (Qu.AsSingle (NodeEntry' arch)) ->
+  Qu.QuantEach (NodeEntry' arch) ->
   PairGraph sym arch ->
   EquivM sym arch (PPa.PatchPair (SingleBundle sym arch v_split v_merge), PairGraph sym arch)
 mergeBundles splitScope mergeScope snePair pg = withSym $ \sym -> withPG pg $ do
   PS.compositeScopeCases mergeScope splitScope $ \bin scope -> do
-    Qu.AsSingle sne <- PPa.get bin snePair
+    let sne = Qu.quantEach snePair bin
     let dp = singleNodeDivergence sne
     let bin_other = PBi.flipRepr bin
     dpBlk <- PPa.get bin_other (graphNodeBlocks dp)
     let sneBlk = singleNodeBlock sne
     let blks = PPa.mkPair bin sneBlk dpBlk
     bundle <- lift $ noopBundle scope blks
-    Qu.AsSingle sne_other <- PPa.get bin_other snePair
-    (st_other,binds) <- liftEqM $ \pg_ -> liftIO $ initFnBindings sym mergeScope sne_other pg_
+    let sne_other = Qu.quantEach snePair bin_other 
+    (st_other,binds) <- liftEqM $ \pg_ -> liftIO $ initFnBindings sym mergeScope (GraphNode sne_other) pg_
     output <- PPa.get bin_other (simOut bundle)
     PS.PopT output' <- return $ PS.fromGlobalScope $ PS.PopT (output { PS.simOutState = st_other })
     domSpec <- liftPG $ getCurrentDomainM (GraphNode $ singleToNodeEntry sne)
@@ -1300,7 +1300,7 @@ withCurrentAbsDomain node gr f = do
       -- node but we don't have a singleton variant of the entry point
       case getDivergePoint (GraphNode node) of
         Just (GraphNode divergeNode) -> do
-          Just (Some bin) <- return $ singleNodeRepr (GraphNode node)
+          Just (Some bin) <- return $ nodeToSingleRepr (GraphNode node)
           let fnNode_diverge = functionEntryOf divergeNode
           fnNode_diverge_single <- toSingleNode bin fnNode_diverge
           case getCurrentDomain gr (GraphNode fnNode_diverge) of

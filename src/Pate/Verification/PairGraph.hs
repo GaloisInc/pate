@@ -90,7 +90,7 @@ module Pate.Verification.PairGraph
   , syncExceptions
   , syncStates
   , syncBindings
-  , singleNodeRepr
+  , nodeToSingleRepr
   , edgeActions
   , nodeActions
   , refineActions
@@ -458,12 +458,12 @@ data SyncData sym arch =
       --   They are propagated backwards through the single-sided analysis until reaching the divergence point,
       --   where they are ultimately discharged by rewriting the uninterpreted functions according to the
       --   collected bindings.
-    , _syncBindings :: MapF (Qu.AsSingle (NodeEntry' arch)) (PFn.FnBindingsSpec sym arch)
+    , _syncBindings :: MapF (Qu.AsSingle (GraphNode' arch)) (PFn.FnBindingsSpec sym arch)
       -- | When a sync point has an assertion that needs to be propagated through the single-sided analysis,
       --   it generates a set of uninterpreted functions (implicitly scoped to the program state at the divergence point),
       --   that represent the single-sided program state at exactly that sync point.
       --   The domain should always be a subset of the sync points.
-    , _syncStates :: MapF (Qu.AsSingle (NodeEntry' arch)) (PS.SimState sym arch PS.GlobalScope)
+    , _syncStates :: MapF (Qu.AsSingle (GraphNode' arch)) (PS.SimState sym arch PS.GlobalScope)
     }
 
 
@@ -529,17 +529,17 @@ getSingleNodeData ::
   HasCallStack =>
   (OrdF x, Ord (x bin)) =>
   L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PairGraphM sym arch (Set (x bin))
-getSingleNodeData lens sne =
-  getPG $ syncDataSet (singleNodeDivergePoint sne) (singleEntryBin sne) lens
+getSingleNodeData lens sgn =
+  getPG $ syncDataSet (singleNodeDivergePoint sgn) (singleNodeRepr sgn) lens
 
 addFnBindings ::
   sym ~ W4B.ExprBuilder s st fs =>
   PA.ValidArch arch =>
   sym ->
   PS.SimScope sym arch v ->
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PFn.FnBindings sym bin v ->
   PairGraph sym arch ->
   IO (PFn.FnBindings sym bin v, PairGraph sym arch)
@@ -552,7 +552,7 @@ addFnBindings sym scope sne binds pg = case MapF.lookup (Qu.AsSingle sne) (pg ^.
     return $ (binds', pg & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle sne) (PS.AbsT $ PS.mkSimSpec scope binds'))
   Nothing -> return $ (binds, pg & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle sne) (PS.AbsT $ PS.mkSimSpec scope binds))
   where
-    dp = singleNodeDivergence sne
+    dp = singleNodeDivergePoint sne
 
 
 -- | Retrieve the final state that binds the given scope to instead be
@@ -565,7 +565,7 @@ initFnBindings ::
   PA.ValidArch arch =>
   sym ->
   PS.SimScope sym arch v ->
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PairGraph sym arch ->
   IO ((PS.SimState sym arch PS.GlobalScope bin, PFn.FnBindings sym bin v), PairGraph sym arch)
 initFnBindings sym scope sne pg = do
@@ -583,8 +583,8 @@ initFnBindings sym scope sne pg = do
       (binds', pg'') <- addFnBindings sym scope sne binds pg'
       return $ ((st_global, binds'), pg'')
   where
-    dp = singleNodeDivergence sne
-    bin = singleEntryBin sne
+    dp = singleNodeDivergePoint sne
+    bin = singleNodeRepr sne
 
     st :: PS.SimState sym arch v bin
     st = PS.simVarState $ case bin of
@@ -683,8 +683,8 @@ mkProcessMerge ::
   SingleNodeEntry arch (PBi.OtherBinary bin) ->
   Maybe (WorkItem arch)
 mkProcessMerge syncAtExit sne1 sne2
-  | dp1 <- singleNodeDivergePoint sne1
-  , dp2 <- singleNodeDivergePoint sne2
+  | dp1 <- singleNodeDivergePoint (GraphNode sne1)
+  , dp2 <- singleNodeDivergePoint (GraphNode sne2)
   , dp1 == dp2 = case singleEntryBin sne1 of
     PBi.OriginalRepr -> case syncAtExit of
       True -> Just $ ProcessMergeAtExitsCtor sne1 sne2
@@ -698,7 +698,7 @@ mkProcessMerge _ _ _ = Nothing
 --   its own divergence point
 mkProcessSplit :: SingleNodeEntry arch bin -> Maybe (WorkItem arch)
 mkProcessSplit sne = do
-  GraphNode dp_ne <- return $ singleNodeDivergePoint sne
+  GraphNode dp_ne <- return $ singleNodeDivergePoint (GraphNode sne)
   sne_dp <- toSingleNodeEntry (singleEntryBin sne) dp_ne
   guard (sne_dp == sne)
   return (ProcessSplit sne)
@@ -1388,8 +1388,8 @@ combineNodes node1 node2 = do
   guard $ divergeO == divergeP
   return $ GraphNode $ mkMergedNodeEntry divergeO (singleNodeBlock nodeO) (singleNodeBlock nodeP)
 
-singleNodeRepr :: GraphNode arch -> Maybe (Some (PBi.WhichBinaryRepr))
-singleNodeRepr nd = case graphNodeBlocks nd of
+nodeToSingleRepr :: GraphNode arch -> Maybe (Some (PBi.WhichBinaryRepr))
+nodeToSingleRepr nd = case graphNodeBlocks nd of
   PPa.PatchPairSingle bin _ -> return $ Some bin
   PPa.PatchPair{} -> Nothing
 
@@ -1549,12 +1549,12 @@ getPendingActions lens = do
   return $ (pairGraphPendingActs pg) ^. lens
 
 isCutAddressFor ::
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PAd.ConcreteAddress arch ->
   PairGraphM sym arch Bool
 isCutAddressFor sne addr = do
   cuts <- getSingleNodeData syncCutAddresses sne
-  return $ Set.member (PPa.WithBin (singleEntryBin sne) addr) cuts
+  return $ Set.member (PPa.WithBin (singleNodeRepr sne) addr) cuts
 
 isSyncExit :: 
   forall sym arch bin.
@@ -1562,12 +1562,12 @@ isSyncExit ::
   PB.BlockTarget arch bin ->
   PairGraphM sym arch (Maybe (SyncPoint arch bin))
 isSyncExit sne blkt@(PB.BlockTarget{}) = do
-  excepts <- getSingleNodeData syncExceptions sne
-  syncs <- getSingleNodeData syncPoints sne
+  excepts <- getSingleNodeData syncExceptions (GraphNode sne)
+  syncs <- getSingleNodeData syncPoints (GraphNode sne)
   let isExcept = Set.member (TupleF2 (Qu.AsSingle sne) blkt) excepts 
   case isExcept of
     True -> return Nothing
-    False -> isCutAddressFor sne (PB.targetRawPC blkt) >>= \case
+    False -> isCutAddressFor (GraphNode sne) (PB.targetRawPC blkt) >>= \case
       True -> do
         let sne_tgt = mkSingleNodeEntry (singleToNodeEntry sne) (PB.targetCall blkt)
         return $ Just $ SyncAtExit sne sne_tgt
@@ -1592,7 +1592,7 @@ isSyncNode ::
   SingleNodeEntry arch bin ->
   PairGraphM sym arch Bool
 isSyncNode sne = do
-  cuts <- getSingleNodeData syncCutAddresses sne
+  cuts <- getSingleNodeData syncCutAddresses (GraphNode sne)
   return $ Set.member (singleNodeAddr sne) cuts
 
 -- | Filter a list of reachable block exits to
@@ -1626,7 +1626,7 @@ filterSyncExits priority (ProcessSplit sne) blktPairs = pgValid $ do
       return []
     False -> do
       let bin = singleEntryBin sne
-      desyncExits <- getSingleNodeData syncDesyncExits sne
+      desyncExits <- getSingleNodeData syncDesyncExits (GraphNode sne)
       let isDesyncExitPair blktPair = do
             blkt <- PPa.get bin blktPair
             return $ Set.member blkt desyncExits
@@ -1654,8 +1654,8 @@ addReturnPointSync priority ne blktPair = case asSingleNodeEntry ne of
     blkt <- PPa.get bin blktPair
     case PB.targetReturn blkt of
       Just ret -> do
-        cuts <- getSingleNodeData syncCutAddresses sne
-        excepts <- getSingleNodeData syncExceptions sne
+        cuts <- getSingleNodeData syncCutAddresses (GraphNode sne)
+        excepts <- getSingleNodeData syncExceptions (GraphNode sne)
         let isExcept = Set.member (TupleF2 (Qu.AsSingle sne) blkt) excepts
         case (not isExcept) &&
           Set.member (PPa.WithBin (singleEntryBin sne) (PB.concreteAddress ret)) cuts of
@@ -1692,7 +1692,7 @@ queueExitMerges ::
   PairGraphM sym arch ()
 queueExitMerges priority sp = do
   let sne = syncPointNode sp
-  let dp = singleNodeDivergePoint sne
+  let dp = singleNodeDivergence sne
   addToSyncData syncPoints (singleEntryBin sne) dp sp
   otherExits <- getSyncData syncPoints (PBi.flipRepr (singleEntryBin sne)) dp
   forM_ otherExits $ \syncOther -> queueSyncPoints priority sp syncOther
@@ -1708,7 +1708,7 @@ handleSingleSidedReturnTo ::
 handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
   Just (Some (Qu.AsSingle sne)) -> do
     let bin = singleEntryBin sne
-    let dp = singleNodeDivergePoint sne
+    let dp = singleNodeDivergence sne
     syncAddrs <- getSyncData syncCutAddresses bin dp
     let blk = singleNodeBlock sne
     case Set.member (PPa.WithBin bin (PB.concreteAddress blk)) syncAddrs of
