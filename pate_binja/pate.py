@@ -998,7 +998,7 @@ def traceConstraintsJSONObjectHook(d: dict):
 
 def extractTraceVars(condition: ConditionTrace) -> list[TraceVar]:
     footprint = condition.trace_footprint
-    pprint.pprint(condition.trace_footprint)
+    #pprint.pprint(condition.trace_footprint)
     traceVars = []
     # for r in footprint['original']['fp_initial_regs']['reg_op']['map']:
     #     traceVars.append(TraceVar('original', 'reg_op', r))
