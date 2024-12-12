@@ -144,6 +144,7 @@ import Data.Parameterized.PairF (PairF(..))
 import qualified What4.Concrete as W4
 import Data.Parameterized (Pair(..))
 import qualified Pate.Verification.FnBindings as PFn
+import Data.Parameterized.WithRepr (withRepr)
 
 -- Overall module notes/thoughts
 --
@@ -578,13 +579,17 @@ addImmediateEqDomRefinementChoice nd preD gr0 = do
 --   If there is no single-sided domain, then it is initialized to be the split
 --   version of the two-sided analysis.
 initSingleSidedDomain ::
+  forall sym arch bin.
   SingleNodeEntry arch bin ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-initSingleSidedDomain sne pg0 = withPG_ pg0 $ do
+initSingleSidedDomain sne pg0 = withRepr bin $ withSym $ \sym -> withPG_ pg0 $ do
   priority <- lift $ thisPriority
-  let bin = singleEntryBin sne
-  let nd = singleNodeDivergence sne
+  
+  let nd = singleNodeDivergePoint (GraphNode sne)
+  nd' <- case Qu.convertQuant nd of
+    Just (nd' :: GraphNode' arch Qu.AllK) -> return nd'
+    Nothing -> fail $ "Unexpected single-sided diverge point: " ++ show nd
   let nd_single = GraphNode (singleToNodeEntry sne)
   dom_spec <- liftPG $ getCurrentDomainM nd
   PS.forSpec dom_spec $ \scope dom -> do
@@ -597,10 +602,10 @@ initSingleSidedDomain sne pg0 = withPG_ pg0 $ do
         let dom_single_spec = PS.mkSimSpec scope dom_single
         liftPG $ modify $ \pg -> initDomain pg nd nd_single (priority PriorityHandleDesync) dom_single_spec
     -}
-    sne_other <- toSingleNodeEntry (PBi.flipRepr bin) ne
+    let (sne_other :: SingleGraphNode arch (PBi.OtherBinary bin)) = Qu.coerceQuant nd'
     
     bundle <- lift $ noopBundle scope (graphNodeBlocks nd)
-    mbindsThis <- lift $ lookupFnBindings scope sne pg0
+    mbindsThis <- lift $ lookupFnBindings scope (GraphNode sne) pg0
     mbindsOther <- lift $ lookupFnBindings scope sne_other pg0
 
 
@@ -640,6 +645,8 @@ initSingleSidedDomain sne pg0 = withPG_ pg0 $ do
       (Nothing, Nothing) -> liftEqM_ do_widen
     
     return (PS.WithScope ())
+  where
+    bin = singleNodeRepr (GraphNode sne)
 
 withGraphNode' ::
   PS.SimScope sym arch v ->

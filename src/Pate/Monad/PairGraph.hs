@@ -70,6 +70,8 @@ import qualified Prettyprinter as PP
 import qualified What4.Interface as W4
 import qualified Pate.Verification.FnBindings as PFn
 import qualified What4.Concrete as W4
+import qualified Data.Quant as Qu
+
 
 instance IsTraceNode (k :: l) "pg_trace" where
   type TraceNodeType k "pg_trace" = [String]
@@ -329,10 +331,10 @@ runPendingActions lens edge result pg0 = do
 
 lookupFnBindings ::
   PS.SimScope sym arch v ->
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PFn.FnBindings sym bin v))
-lookupFnBindings scope sne pg = withSym $ \sym -> case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+lookupFnBindings scope sne pg = withSym $ \sym -> case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncBindings)) of
   Just (PS.AbsT bindsSpec) -> Just <$> (IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec)
   Nothing -> return Nothing
   where

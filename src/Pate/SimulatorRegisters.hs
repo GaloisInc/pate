@@ -98,13 +98,6 @@ data MacawRegVar sym (tp :: MT.Type) where
     , macawVarBVs :: Ctx.Assignment (WI.SymExpr sym) (CrucBaseTypes (MS.ToCrucibleType tp))
     } -> MacawRegVar sym tp
 
-instance PEM.ExprFoldable sym (MacawRegVar sym tp) where
-  foldExpr sym f entry b = PEM.withSymExprFoldable sym $
-    PEM.foldExpr sym f (macawVarBVs entry) b >>= PEM.foldExpr sym f (macawVarEntry entry)
-
-
-instance forall sym. PEM.ExprFoldableF sym (MacawRegVar sym)
-
 instance (WI.IsExpr (WI.SymExpr sym)) => Show (MacawRegEntry sym tp) where
   show (MacawRegEntry repr v) = case repr of
     CLM.LLVMPointerRepr{} | CLM.LLVMPointer rg bv <- v -> show (WI.printSymNat rg) ++ "+" ++ show (WI.printSymExpr bv)

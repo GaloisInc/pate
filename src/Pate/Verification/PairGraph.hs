@@ -530,30 +530,30 @@ getSingleNodeData ::
   HasCallStack =>
   (OrdF x, Ord (x bin)) =>
   L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PairGraphM sym arch (Set (x bin))
 getSingleNodeData lens sne =
-  getPG $ syncDataSet (singleNodeDivergePoint sne) (singleEntryBin sne) lens
+  getPG $ syncDataSet (singleNodeDivergePoint sne) (singleNodeRepr sne) lens
 
 addFnBindings ::
   sym ~ W4B.ExprBuilder s st fs =>
   PA.ValidArch arch =>
   sym ->
   PS.SimScope sym arch v ->
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PFn.FnBindings sym bin v ->
   PairGraph sym arch ->
   IO (PFn.FnBindings sym bin v, PairGraph sym arch)
-addFnBindings sym scope sne binds pg = case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+addFnBindings sym scope sne binds pg = case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncBindings)) of
   Just (PS.AbsT bindsSpec_prev) -> do
     binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
     binds' <- case PFn.merge binds binds_prev of
       Just binds' -> return binds'
       Nothing -> fail "addFnBindings: unexpected binding clash"
-    return $ (binds', pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds'))
-  Nothing -> return $ (binds, pg & (syncData dp . syncBindings) %~ MapF.insert sne (PS.AbsT $ PS.mkSimSpec scope binds))
+    return $ (binds', pg & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle sne) (PS.AbsT $ PS.mkSimSpec scope binds'))
+  Nothing -> return $ (binds, pg & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle sne) (PS.AbsT $ PS.mkSimSpec scope binds))
   where
-    dp = singleNodeDivergence sne
+    dp = singleNodeDivergePoint sne
 
 
 -- | Retrieve the final state that binds the given scope to instead be
@@ -566,26 +566,26 @@ initFnBindings ::
   PA.ValidArch arch =>
   sym ->
   PS.SimScope sym arch v ->
-  SingleNodeEntry arch bin ->
+  SingleGraphNode arch bin ->
   PairGraph sym arch ->
   IO ((PS.SimState sym arch PS.GlobalScope bin, PFn.FnBindings sym bin v), PairGraph sym arch)
 initFnBindings sym scope sne pg = do
-  case MapF.lookup sne (pg ^. (syncData dp . syncStates)) of
+  case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncStates)) of
     -- if we already have a 'syncState' entry, then we should re-use those
     -- uninterpreted functions rather than making new ones
-    Just st_global -> case MapF.lookup sne (pg ^. (syncData dp . syncBindings)) of
+    Just st_global -> case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncBindings)) of
       Just (PS.AbsT bindsSpec_prev) -> do
         binds_prev <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec_prev
         return ((st_global, binds_prev), pg)
       Nothing -> fail $ "Missing binding information for node: " ++ show sne
     Nothing -> do
       (PS.PopT st_global, binds) <- PFn.init sym (PS.PopT st)
-      let pg' = pg & (syncData dp . syncStates) %~ MapF.insert sne st_global
+      let pg' = pg & (syncData dp . syncStates) %~ MapF.insert (Qu.AsSingle sne) st_global
       (binds', pg'') <- addFnBindings sym scope sne binds pg'
       return $ ((st_global, binds'), pg'')
   where
-    dp = singleNodeDivergence sne
-    bin = singleEntryBin sne
+    dp = singleNodeDivergePoint sne
+    bin = singleNodeRepr sne
 
     st :: PS.SimState sym arch v bin
     st = PS.simVarState $ case bin of
