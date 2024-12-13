@@ -38,6 +38,7 @@ are generalized over concrete, existential and universal quantification.
 {-# LANGUAGE EmptyCase #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE DefaultSignatures #-}
+{-# LANGUAGE TypeFamilyDependencies #-}
 
 module Data.Quant
   ( 
@@ -68,12 +69,27 @@ module Data.Quant
     , QuantEach
     , pattern QuantEach
     , AsSingle(..)
+    , toSingleQuant
+    , pattern SomeSingle
+    , coerceToExists
+    , KnownConversion
+    , KnownCoercion
+    , pattern CoerceToExists
+    , Exists
+    , pattern Exists
+    , pattern ExistsOne
+    , pattern ExistsAll
+    , IsExistsOr(..)
+    , TheOneK
+    , IfIsOneK
+    , coerceExists
   ) where
 
 import           Prelude hiding (map, traverse)
 
 import           Data.Kind (Type)
 import           Data.Constraint
+import qualified Data.List as List
 
 import Data.Functor.Const
 import Data.Proxy
@@ -84,6 +100,7 @@ import Data.Parameterized.Some
 import qualified Data.Parameterized.TotalMapF as TMF
 import           Data.Parameterized.TotalMapF ( TotalMapF, HasTotalMapF )
 import           Data.Parameterized.WithRepr
+import qualified Data.Parameterized.Map as MapF
 
 -- | Wraps the kind 'k' with additional cases for existential and
 --   universal quantification
@@ -291,8 +308,21 @@ instance (HasReprK k, forall x. Ord (f x)) => Ord (Quant (f :: k -> Type) tp) wh
 data QuantCoercion (t1 :: QuantK k) (t2 :: QuantK k) where
     CoerceAllToOne :: ReprOf x -> QuantCoercion AllK (OneK x)
     CoerceAllToExists :: QuantCoercion AllK ExistsK
-    CoerceOneToExists :: QuantCoercion (OneK x) ExistsK
-    CoerceRefl :: QuantCoercion x x
+    CoerceOneToExists :: ReprOf x -> QuantCoercion (OneK x) ExistsK
+    CoerceRefl :: QuantRepr x -> QuantCoercion x x
+
+
+pattern CoerceToExists :: forall t1 t2. () => (t2 ~ ExistsK) => QuantRepr t1 -> QuantCoercion t1 t2
+pattern CoerceToExists repr <- 
+  ((\l -> case l of 
+    CoerceAllToExists -> Just (QuantAllRepr, Refl)
+    CoerceOneToExists repr -> Just (QuantOneRepr repr, Refl)
+    CoerceRefl QuantSomeRepr -> Just (QuantSomeRepr, Refl)
+    _ -> Nothing) 
+      -> Just (repr :: QuantRepr t1, Refl :: t2 :~: ExistsK))
+
+{-# COMPLETE CoerceAllToOne, CoerceAllToExists, CoerceOneToExists, CoerceRefl #-}
+{-# COMPLETE CoerceAllToOne, CoerceToExists, CoerceRefl #-}
 
 class QuantCoercible (f :: QuantK k -> Type)  where
     applyQuantCoercion :: forall t1 t2. HasReprK k => QuantCoercion t1 t2 -> f t1 -> f t2
@@ -301,19 +331,25 @@ class QuantCoercible (f :: QuantK k -> Type)  where
     coerceQuant :: forall t1 t2. (HasReprK k, KnownCoercion t1 t2) => f t1 -> f t2
     coerceQuant = applyQuantCoercion knownRepr
 
+coerceToExists :: forall {k} f (tp :: QuantK k). (HasReprK k, QuantCoercible f, KnownRepr QuantRepr tp) => f tp -> f ExistsK
+coerceToExists x = case knownRepr :: QuantRepr tp of
+  QuantOneRepr repr -> applyQuantCoercion (CoerceOneToExists repr) x
+  QuantAllRepr -> applyQuantCoercion CoerceAllToExists x
+  QuantSomeRepr -> x
+
 instance HasReprK k => IsRepr (QuantCoercion (t1 :: QuantK k)) where
     withRepr x f = case x of
         CoerceAllToOne repr -> withRepr repr $ f
         CoerceAllToExists -> f
-        CoerceOneToExists -> f
-        CoerceRefl -> f
+        CoerceOneToExists repr -> withRepr repr $ f
+        CoerceRefl qrepr -> withRepr qrepr $ f
 
 instance QuantCoercible (Quant (f :: k -> Type)) where
     applyQuantCoercion qc q = case (qc, q) of
         (CoerceAllToOne repr, QuantAll f) -> QuantOne repr (TMF.apply f repr)
         (CoerceAllToExists, QuantAll{}) -> QuantAny q
-        (CoerceOneToExists, QuantOne{}) -> QuantExists q
-        (CoerceRefl, _) -> q
+        (CoerceOneToExists{}, QuantOne{}) -> QuantExists q
+        (CoerceRefl{}, _) -> q
 
 type KnownCoercion (tp1 :: QuantK k) (tp2 :: QuantK k) = KnownRepr (QuantCoercion tp1) tp2
 
@@ -324,25 +360,18 @@ instance (KnownRepr (ReprOf :: k -> Type) (x :: k)) => KnownRepr (QuantCoercion 
 instance KnownRepr (QuantCoercion AllK) ExistsK where
     knownRepr = CoerceAllToExists
 
-instance KnownRepr (QuantCoercion (OneK x)) ExistsK where
-    knownRepr = CoerceOneToExists
+instance KnownRepr ReprOf x => KnownRepr (QuantCoercion (OneK x)) ExistsK where
+    knownRepr = CoerceOneToExists knownRepr
 
-instance KnownRepr (QuantCoercion x) x where
-    knownRepr = CoerceRefl
-
+instance KnownRepr QuantRepr tp => KnownRepr (QuantCoercion tp) tp where
+    knownRepr = CoerceRefl knownRepr
 
 data QuantConversion (t1 :: QuantK k) (t2 :: QuantK k) where
-    ConvertWithCoerce :: QuantCoercion t1 t2 -> QuantConversion t1 t2
     ConvertExistsToAll :: QuantConversion ExistsK AllK
     ConvertExistsToOne :: ReprOf x -> QuantConversion ExistsK (OneK x)
 
 instance HasReprK k => IsRepr (QuantConversion (t1 :: QuantK k)) where
     withRepr x f = case x of
-        ConvertWithCoerce y -> case y of
-            CoerceAllToOne repr -> withRepr repr $ f
-            CoerceAllToExists -> f
-            CoerceOneToExists -> f
-            CoerceRefl -> f
         ConvertExistsToAll -> f
         ConvertExistsToOne repr -> withRepr repr $ f
 
@@ -353,19 +382,75 @@ class QuantConvertible (f :: QuantK k -> Type)  where
     convertQuant :: forall t1 t2. (HasReprK k, KnownConversion t1 t2) => f t1 -> Maybe (f t2)
     convertQuant = applyQuantConversion knownRepr
 
+findFirst :: (a -> Maybe b) -> [a] -> Maybe b
+findFirst _ [] = Nothing
+findFirst f (x:xs) = case f x of
+    Just y -> Just y
+    Nothing -> findFirst f xs
+
+data MaybeF f tp = JustF (f tp) | NothingF
+
+-- | Project out a 'Quant' of singletons from a given 'f' parameterized by 'QuantK k'.
+--   Uses the 'QuantCoercible' and 'QuantConvertible' instances to attempt to coerce/convert
+--   'f' into each possible single value.
+toSingleQuant :: 
+    forall {k} f (tp :: QuantK k). 
+    ( HasReprK k
+    , QuantCoercible f
+    , QuantConvertible f
+    , KnownRepr QuantRepr tp) => 
+    f tp -> 
+    Maybe (Quant (AsSingle f) tp)
+toSingleQuant f = case knownRepr :: QuantRepr tp of
+  QuantOneRepr repr -> Just $ Single repr (AsSingle f)
+  QuantAllRepr -> Just $ All (\r -> AsSingle $ applyQuantCoercion (CoerceAllToOne r) f)
+  QuantSomeRepr -> case applyQuantConversion ConvertExistsToAll f of
+    Just f' -> QuantAny <$> toSingleQuant f'
+    Nothing -> 
+      let y = TMF.mapWithKey 
+                (\r _ -> case applyQuantConversion (ConvertExistsToOne r) f of 
+                  Just x -> JustF (AsSingle x)
+                  Nothing -> NothingF)  
+                (allReprs :: TMF.TotalMapF (ReprOf :: k -> Type) (Const ()))
+      in case TMF.traverseWithKey (\_ -> \case JustF x -> Just x; NothingF -> Nothing) y of
+        -- if we can convert to each individual singleton, then we can take all of the results and turn this into a QuantAll
+        -- (i.e. likely all of the inner Quants are QuantAny, and so can be converted to any single value)
+        Just z -> Just (QuantAny $ QuantAll z)
+        -- otherwise we just take the first successful conversion
+        Nothing -> findFirst 
+          (\(MapF.Pair repr x) -> case x of 
+              JustF (AsSingle z) -> Just (QuantExists $ QuantOne repr (AsSingle z))
+              NothingF -> Nothing) 
+          (TMF.toList y)
+
+data SomeSingle f tp where
+  SomeSingleCtor :: (IsExistsOr tp (OneK (TheOneK tp)), IfIsOneK tp (x ~ TheOneK tp)) => ReprOf x -> f (OneK x) -> SomeSingle f tp
+
+toSomeSingle :: HasReprK k => Quant (AsSingle f) (tp :: QuantK k) -> Maybe (SomeSingle f tp)
+toSomeSingle = \case
+  QuantExists (QuantOne repr (AsSingle x)) -> Just $ SomeSingleCtor repr x 
+  QuantOne repr (AsSingle x) -> Just $ SomeSingleCtor repr x
+  _ -> Nothing
+
+pattern SomeSingle :: 
+    forall {k} (f :: QuantK k -> Type) (tp :: QuantK k).
+    ( HasReprK k
+    , QuantCoercible f
+    , QuantConvertible f
+    , KnownRepr QuantRepr tp) => 
+    forall (x :: k). (IsExistsOr tp (OneK (TheOneK tp)), IfIsOneK tp (x ~ TheOneK tp)) => 
+    ReprOf x ->
+    f (OneK x) -> 
+    f tp
+pattern SomeSingle repr x <- ((\l -> toSingleQuant l >>= toSomeSingle) -> (Just (SomeSingleCtor repr x)))
+  where
+    SomeSingle repr x = case (isExistsOr :: ExistsOrCases tp (OneK (TheOneK tp))) of
+      ExistsOrExists -> withRepr repr $ coerceQuant x
+      ExistsOrRefl -> x
+
+
 type KnownConversion (tp1 :: QuantK k) (tp2 :: QuantK k) = KnownRepr (QuantConversion tp1) tp2
 
-instance (KnownRepr (ReprOf :: k -> Type) (x :: k)) => KnownRepr (QuantConversion AllK) (OneK x) where
-    knownRepr = ConvertWithCoerce knownRepr
-
-instance KnownRepr (QuantConversion AllK) ExistsK where
-    knownRepr = ConvertWithCoerce knownRepr
-
-instance KnownRepr (QuantConversion (OneK x)) ExistsK where
-    knownRepr = ConvertWithCoerce knownRepr
-
-instance KnownRepr (QuantConversion x) x where
-    knownRepr = ConvertWithCoerce knownRepr
 
 instance KnownRepr (QuantConversion ExistsK) AllK where
     knownRepr = ConvertExistsToAll
@@ -376,7 +461,6 @@ instance (KnownRepr (ReprOf :: k -> Type) (x :: k)) => KnownRepr (QuantConversio
 
 instance QuantConvertible (Quant (f :: k -> Type)) where
     applyQuantConversion qc q = case (qc, q) of
-        (ConvertWithCoerce qc', _) -> Just (applyQuantCoercion qc' q)
         (ConvertExistsToAll, QuantAny q') -> Just q'
         (ConvertExistsToAll, QuantExists{}) -> Nothing
         (ConvertExistsToOne repr, QuantAny q') -> Just (applyQuantCoercion (CoerceAllToOne repr) q')
@@ -536,3 +620,145 @@ _testQuantEach1 :: HasReprK k => Quant (AsSingle (f :: QuantK k -> Type)) AllK -
 _testQuantEach1 = \case
     QuantEach (_f :: forall (x :: k). ReprOf x -> f (OneK x)) -> ()
     -- complete match, since Single has an unsolvable constraint
+
+instance HasTotalMapF (ReprOf :: k -> Type) => HasTotalMapF (QuantRepr :: QuantK k -> Type) where
+  allValues = (Some QuantAllRepr:Some QuantSomeRepr:List.map (\(Some r) -> Some (QuantOneRepr r)) TMF.allValues)
+
+instance HasReprK k => HasReprK (QuantK k) where
+  type ReprOf = QuantRepr
+
+
+-- | Augment a type with an existential case
+data Exists f (tp :: QuantK k) where
+  TheOne :: ReprOf x -> f (OneK x) -> Exists f (OneK x)
+  TheAll :: f AllK -> Exists f AllK
+  ExistsOneCtor :: ReprOf x -> f (OneK x) -> Exists f ExistsK
+  ExistsAllCtor :: f AllK -> Exists f ExistsK
+
+instance (HasReprK k, forall (x :: QuantK k). Eq (f x)) => Eq (Exists f tp) where
+  a == b = case (a, b) of
+    (TheOne _ a', TheOne _ b') -> a' == b' 
+    (ExistsOneCtor repra a', ExistsOneCtor reprb b') -> case testEquality repra reprb of
+      Just Refl -> a' == b'
+      Nothing -> False
+    (TheAll a', TheAll b') -> a' == b'
+    (ExistsAllCtor a', ExistsAllCtor b') -> a' == b'
+    _ -> False
+  
+instance (HasReprK k, forall (x :: QuantK k). Ord (f x)) => Ord (Exists f tp) where
+  compare a b = case (a, b) of
+    (ExistsOneCtor repra a', ExistsOneCtor reprb b') -> case compareF repra reprb of
+      EQF -> compare a' b'
+      LTF -> LT
+      GTF -> GT
+    (ExistsAllCtor a', ExistsAllCtor b') -> compare a' b'
+    (TheOne _ a', TheOne _ b') -> compare a' b'
+    (TheAll a', TheAll b') -> compare a' b'
+
+    (ExistsOneCtor{}, ExistsAllCtor{}) -> LT
+    (ExistsAllCtor{}, ExistsOneCtor{}) -> GT
+
+data ExistsOneProof f tp where
+  ExistsOneProof :: (IsExistsOr tp (OneK (TheOneK tp)), IfIsOneK tp (x ~ (TheOneK tp))) => ReprOf x -> f (OneK x) -> ExistsOneProof f tp
+
+existsOne :: HasReprK k => Exists f (tp :: QuantK k) -> Maybe (ExistsOneProof f tp)
+existsOne = \case
+  TheOne repr x -> Just $ ExistsOneProof repr x
+  ExistsOneCtor repr x -> Just $ ExistsOneProof repr x
+  _ -> Nothing
+
+pattern ExistsOne :: 
+  forall {k} f (tp :: QuantK k). 
+    (HasReprK k) => 
+    forall x. (IsExistsOr tp (OneK (TheOneK tp)), IfIsOneK tp (x ~ TheOneK tp)) => 
+    ReprOf x -> 
+    f (OneK x) -> 
+    Exists f tp
+pattern ExistsOne repr x <- (existsOne -> Just (ExistsOneProof repr x))
+  where
+    ExistsOne repr x = existsOrCases @tp @(OneK (TheOneK tp)) (ExistsOneCtor repr x) (TheOne repr x) 
+
+data ExistsAllProof f tp where
+  ExistsAllProof :: (KnownRepr QuantRepr tp, IsExistsOr tp AllK) => f AllK -> ExistsAllProof f tp
+
+existsAll :: Exists f tp -> Maybe (ExistsAllProof f tp)
+existsAll = \case
+  TheAll x -> Just $ ExistsAllProof x
+  ExistsAllCtor x -> Just $ ExistsAllProof x
+  _ -> Nothing
+
+pattern ExistsAll :: forall f tp. () => (KnownRepr QuantRepr tp, IsExistsOr tp AllK) => f AllK -> Exists f tp
+pattern ExistsAll x <- (existsAll -> Just (ExistsAllProof x))
+  where
+    ExistsAll x = existsOrCases @tp @AllK (ExistsAllCtor x) (TheAll x) 
+
+{-# COMPLETE ExistsOne, ExistsAll #-}
+
+
+data ExistsProof f tp where
+  ExistsProof :: (IsExistsOr tp tp', NotExists tp') => QuantRepr tp' -> f tp' -> ExistsProof f tp
+
+existsProof :: Exists f tp -> ExistsProof f tp
+existsProof = \case
+  TheOne repr x -> ExistsProof (QuantOneRepr repr) x
+  TheAll x -> ExistsProof QuantAllRepr x
+  ExistsAllCtor x -> ExistsProof QuantAllRepr x
+  ExistsOneCtor repr x -> ExistsProof (QuantOneRepr repr) x
+
+type family NotExists (tp :: QuantK k) :: Constraint where
+  NotExists ExistsK = True ~ False
+  NotExists _ = ()
+
+pattern Exists :: forall f tp. () => forall tp'. (IsExistsOr tp tp', NotExists tp') => QuantRepr tp' -> f tp' -> Exists f tp
+pattern Exists repr x <- (existsProof -> ExistsProof repr x)
+  where
+    Exists (repr :: QuantRepr tp') x = case repr of
+      QuantOneRepr repr' -> existsOrCases @tp @tp' (ExistsOneCtor repr' x) (TheOne repr' x) 
+      QuantAllRepr -> existsOrCases @tp @tp' (ExistsAllCtor x) (TheAll x)
+
+coerceExists :: Exists f tp -> Exists f ExistsK
+coerceExists e = case e of
+  TheOne repr x -> ExistsOneCtor repr x
+  TheAll x -> ExistsAllCtor x
+  ExistsAllCtor{} -> e
+  ExistsOneCtor{} -> e
+
+{-# COMPLETE Exists #-}
+
+instance QuantCoercible f => QuantCoercible (Exists f) where
+  applyQuantCoercion qc e = case (qc, e) of
+    (CoerceAllToExists, TheAll x) -> ExistsAllCtor x
+    (CoerceOneToExists{}, TheOne repr x) -> ExistsOneCtor repr x
+    (CoerceAllToOne repr, TheAll x) -> TheOne repr (applyQuantCoercion qc x)
+    (CoerceRefl{}, _) -> e
+
+instance QuantCoercible f => QuantConvertible (Exists f) where
+  applyQuantConversion qc e = case (qc, e) of
+    (ConvertExistsToAll, ExistsAllCtor x) -> Just $ TheAll x
+    (ConvertExistsToOne repr, ExistsOneCtor repr' x) -> case testEquality repr repr' of
+      Just Refl -> Just $ TheOne repr x
+      Nothing -> Nothing
+    (ConvertExistsToAll, ExistsOneCtor{}) -> Nothing
+    (ConvertExistsToOne repr, ExistsAllCtor x) -> Just $ TheOne repr (applyQuantCoercion (CoerceAllToOne repr) x)
+
+
+instance FunctorFC Exists where
+  fmapFC f = \case
+    TheOne repr x -> TheOne repr (f x)
+    TheAll x -> TheAll (f x)
+    ExistsOneCtor repr x -> ExistsOneCtor repr (f x)
+    ExistsAllCtor x -> ExistsAllCtor (f x)
+
+instance FoldableFC Exists where
+  foldrFC f b = \case
+      TheOne _ x -> f x b
+      TheAll x -> f x b
+      ExistsOneCtor _ x -> f x b
+      ExistsAllCtor x -> f x b
+
+instance TraversableFC Exists where
+  traverseFC f = \case
+    TheOne repr x -> TheOne <$> pure repr <*> f x
+    TheAll x -> TheAll <$> f x
+    ExistsOneCtor repr x -> ExistsOneCtor <$> pure repr <*> f x
+    ExistsAllCtor x -> ExistsAllCtor <$> f x
