@@ -39,7 +39,7 @@ module Pate.Verification.Widening
   ) where
 
 import           GHC.Stack
-import           Control.Lens ( (.~), (&), (^.) )
+import           Control.Lens ( (.~), (&), (^.), (%~) )
 import           Control.Monad (when, forM_, unless, filterM, foldM, void)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
@@ -107,7 +107,7 @@ import qualified Pate.TraceCollection as PTc
 import           Pate.Verification.PairGraph
 import qualified Pate.Verification.ConditionalEquiv as PVC
 import qualified Pate.Verification.Validity as PVV
-import           Pate.Verification.PairGraph.Node ( GraphNode(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns, graphNodeBlocks )
+import           Pate.Verification.PairGraph.Node ( GraphNode, GraphNode'(..), pattern GraphNodeEntry, pattern GraphNodeReturn, nodeFuns, graphNodeBlocks, asSingleNode, singleNodeDivergence, singleNodeDivergePoint, singleNodeRepr )
 import qualified Pate.Verification.StrongestPosts.CounterExample as CE
 
 import qualified Pate.AssumptionSet as PAs
@@ -132,6 +132,8 @@ import Pate.Verification.Domain (universalDomain)
 import qualified Data.Parameterized.TraversableF as TF
 import qualified Data.IORef as IO
 import qualified Data.Parameterized.TraversableFC as TFC
+import qualified Data.Quant as Qu
+import qualified Pate.Verification.FnBindings as PFn
 
 -- | Generate a fresh abstract domain value for the given graph node.
 --   This should represent the most information we can ever possibly
@@ -829,47 +831,50 @@ propagateBindings ::
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (Maybe (PairGraph sym arch))
-propagateBindings scope bundle from to gr0 = withSym $ \sym -> case (from,to) of
-  (GraphNode fromE, GraphNode toE)
-    | Just (Some fromSNE) <- asSingleNodeEntry fromE
-    , Just  (Some toSNE) <- asSingleNodeEntry toE
-    -- nodes are both single-sided and the same side
-    , Just Refl <- testEquality (singleEntryBin fromSNE) (singleEntryBin toSNE)
-    -- nodes have the same divergence point
-    , fromDP <- singleNodeDivergePoint fromSNE
-    , dp <- singleNodeDivergePoint toSNE
-    , fromDP == dp
-    -- 'to' node has defined bindings that need to be propagated
-    , Just (PS.AbsT toBindsSpec) <- MapF.lookup toSNE (gr0 ^. (syncData dp . syncBindings))
-    -> do
-      let outVars = PS.bundleOutVars scope bundle
-      toBinds <- liftIO $ PS.bindSpec sym outVars toBindsSpec
-      lookupFnBindings scope fromSNE gr0 >>= \case
-        -- 'from' has existing binds so we check if we actually need to propagate
-        -- FIXME: can we check this without the solver? do we need to check it?
-        Just fromBinds -> do
-          emitTrace @"debug" "Propagating and merging with existing bindings"
-          fromBindsPred <- IO.liftIO $ PFn.toPred sym fromBinds
-          withAssumption fromBindsPred $ do
-            toBindsPred <- IO.liftIO $ PFn.toPred sym toBinds
-            not_toBindsPred <- liftIO $ W4.notPred sym toBindsPred
-            goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-            isPredSat' goalTimeout not_toBindsPred >>= \case
-              Just False -> do
-                emitTraceLabel @"expr" (ExprLabel $ "Proved bindings") (Some toBindsPred)
-                return Nothing
-              _ -> do
-                -- FIXME: use 'addFnBindings' instead? needs to take a mux condition
-                pathCond <- scopedPathCondition scope
-                bindsCombined <- IO.liftIO $ PFn.mux sym pathCond toBinds fromBinds
-                return $ Just $ gr0 & (syncData dp . syncBindings) %~ MapF.insert fromSNE (PS.AbsT $ PS.mkSimSpec scope bindsCombined)
-        -- 'from' has no binds so we propagate unconditionally
-        Nothing -> do
-          -- FIXME: do we care about the path condition here?
-          emitTrace @"debug" "Propagating bindings"
-          return $ Just $ gr0 & (syncData dp . syncBindings) %~ MapF.insert fromSNE (PS.AbsT $ PS.mkSimSpec scope toBinds)
+propagateBindings scope bundle from to gr0 = withSym $ \sym -> case (asSingleNode from,asSingleNode to) of
+  (Just (Some (Qu.AsSingle fromS)), Just (Some (Qu.AsSingle toS))) ->
+    case testEquality (singleNodeRepr fromS) (singleNodeRepr toS) of
+      Nothing -> do
+        fail $ "Unexpected mismatched single-sided nodes" ++ show from ++ " vs. " ++ show to
+      Just Refl -> do
+        let dp = singleNodeDivergePoint fromS
+        unless (dp == singleNodeDivergePoint toS) $
+          fail $ "Unexpected mismatched divergence points" ++ show from ++ "vs. " ++ show to
+        case MapF.lookup (Qu.AsSingle toS) (gr0 ^. (syncData dp . syncBindings)) of
+          -- no bindings to propagate, nothing to do
+          Nothing -> do
+            emitTrace @"debug" "No bindings to propagate"
+            return Nothing
+          -- 'to' node has defined bindings that need to be propagated
+          Just (PS.AbsT toBindsSpec) -> do
+            let outVars = PS.bundleOutVars scope bundle
+            toBinds <- liftIO $ PS.bindSpec sym outVars toBindsSpec
+            lookupFnBindings scope fromS gr0 >>= \case
+              -- 'from' has existing binds so we check if we actually need to propagate
+              -- FIXME: can we check this without the solver? do we need to check it?
+              Just fromBinds -> do
+                emitTrace @"debug" "Propagating and merging with existing bindings"
+                fromBindsPred <- IO.liftIO $ PFn.toPred sym fromBinds
+                withAssumption fromBindsPred $ do
+                  toBindsPred <- IO.liftIO $ PFn.toPred sym toBinds
+                  not_toBindsPred <- liftIO $ W4.notPred sym toBindsPred
+                  goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
+                  isPredSat' goalTimeout not_toBindsPred >>= \case
+                    Just False -> do
+                      emitTraceLabel @"expr" (ExprLabel $ "Proved bindings") (Some toBindsPred)
+                      return Nothing
+                    _ -> do
+                      -- FIXME: use 'addFnBindings' instead? needs to take a mux condition
+                      pathCond <- scopedPathCondition scope
+                      bindsCombined <- IO.liftIO $ PFn.mux sym pathCond toBinds fromBinds
+                      return $ Just $ gr0 & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle fromS) (PS.AbsT $ PS.mkSimSpec scope bindsCombined)
+              -- 'from' has no binds so we propagate unconditionally
+              Nothing -> do
+                -- FIXME: do we care about the path condition here?
+                emitTrace @"debug" "Propagating bindings"
+                return $ Just $ gr0 & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle fromS) (PS.AbsT $ PS.mkSimSpec scope toBinds)
   _ -> do
-    emitTrace @"debug" "No bindings to propagate"
+    emitTrace @"debug" "Not a pair of single-sided nodes"
     return Nothing
 
 -- | Propagate the given condition kind backwards (from 'to' node to 'from' node).

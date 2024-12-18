@@ -325,7 +325,7 @@ data PairGraph sym arch =
     -- | Mapping from singleton nodes to their "synchronization" point, representing
     --   the case where two independent program analysis steps have occurred and now
     --   their control-flows have re-synchronized
-  , pairGraphSyncData :: !(Map (GraphNode arch) (SyncData sym arch))
+  , pairGraphSyncData :: !(Map (GraphNode' arch Qu.AllK) (SyncData sym arch))
   , pairGraphPendingActs :: ActionQueue sym arch
   , pairGraphDomainRefinements ::
       !(Map (GraphNode arch) [DomainRefinement sym arch])
@@ -521,7 +521,7 @@ getSyncData ::
   (OrdF x, Ord (x bin)) =>
   L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
   PBi.WhichBinaryRepr bin ->
-  GraphNode arch {- ^ The divergent node -}  ->
+  GraphNode' arch Qu.AllK {- ^ The divergent node -}  ->
   PairGraphM sym arch (Set (x bin))
 getSyncData lens bin nd = getPG $ syncDataSet nd bin lens
 
@@ -594,7 +594,7 @@ initFnBindings sym scope sne pg = do
 
 syncData ::
   forall sym arch.
-  GraphNode arch ->
+  GraphNode' arch Qu.AllK ->
   L.Lens' (PairGraph sym arch) (SyncData sym arch)
 syncData nd f pg = fmap set_ (f get_)
     where
@@ -609,7 +609,7 @@ syncData nd f pg = fmap set_ (f get_)
 syncDataSet ::
   forall k sym arch bin.
   (OrdF k, Ord (k bin)) =>
-  GraphNode arch ->
+  GraphNode' arch Qu.AllK ->
   PBi.WhichBinaryRepr bin ->
   L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF k)) ->
   L.Lens' (PairGraph sym arch) (Set (k bin))
@@ -622,7 +622,7 @@ modifySyncData ::
   (OrdF x, Ord (x bin)) =>
   L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
   PBi.WhichBinaryRepr bin ->
-  GraphNode arch -> 
+  GraphNode' arch Qu.AllK -> 
   (Set (x bin) -> Set (x bin)) ->
   PairGraphM sym arch ()
 modifySyncData lens bin dp f = setPG f $ syncDataSet dp bin lens
@@ -633,14 +633,14 @@ addToSyncData ::
   HasCallStack =>
   L.Lens' (SyncData sym arch) (PPa.PatchPair (SetF x)) ->
   PBi.WhichBinaryRepr bin ->
-  GraphNode arch {- ^ The divergent node -}  ->
+  GraphNode' arch Qu.AllK {- ^ The divergent node -}  ->
   x bin ->
   PairGraphM sym arch ()
 addToSyncData lens bin nd x = modifySyncData lens bin nd (Set.insert x)
 
 addSyncAddress ::
   forall sym arch bin.
-  GraphNode arch {- ^ The divergent node -}  ->
+  GraphNode' arch Qu.AllK {- ^ The divergent node -}  ->
   PBi.WhichBinaryRepr bin ->
   PAd.ConcreteAddress arch ->
   PairGraphM sym arch ()
@@ -648,7 +648,7 @@ addSyncAddress nd bin syncAddr = addToSyncData syncCutAddresses bin nd (PPa.With
 
 addDesyncExits ::
   forall sym arch.
-  GraphNode arch {- ^ The divergent node -}  ->
+  GraphNode' arch Qu.AllK {- ^ The divergent node -}  ->
   PPa.PatchPair (PB.BlockTarget arch) ->
   PairGraphM sym arch ()
 addDesyncExits dp blktPair = do
@@ -665,7 +665,7 @@ handleKnownDesync ::
   PPa.PatchPair (PB.BlockTarget arch) ->
   PairGraphM sym arch Bool
 handleKnownDesync priority ne blkt = fmap (fromMaybe False) $ tryPG $ do
-  let dp = GraphNode ne
+  dp <- toTwoSidedNode $ GraphNode ne
   desyncExitsO <- getSyncData syncDesyncExits PBi.OriginalRepr dp
   desyncExitsP <- getSyncData syncDesyncExits PBi.PatchedRepr dp
   case not (Set.null desyncExitsO) && not (Set.null desyncExitsP) of
@@ -678,7 +678,7 @@ handleKnownDesync priority ne blkt = fmap (fromMaybe False) $ tryPG $ do
 -- | Queue all the sync points to be processed (merged) for a given
 --   divergence
 getAllSyncPoints ::
-  GraphNode arch ->
+  GraphNode' arch Qu.AllK ->
   PairGraphM sym arch [PPa.PatchPair (SyncPoint arch)]
 getAllSyncPoints nd = do
   syncsO <- getSyncData syncPoints PBi.OriginalRepr nd
@@ -948,9 +948,9 @@ getReturnVectors gr fPair = fromMaybe mempty (Map.lookup fPair (pairGraphReturnV
 -- | Look up the current abstract domain for the given graph node.
 getCurrentDomain ::
   PairGraph sym arch ->
-  GraphNode arch ->
+  GraphNode' arch qbin ->
   Maybe (AbstractDomainSpec sym arch)
-getCurrentDomain pg nd = Map.lookup nd (pairGraphDomains pg)
+getCurrentDomain pg nd = withKnownBin nd $ Map.lookup (Qu.coerceToExists nd) (pairGraphDomains pg)
 
 getCurrentDomainM ::
   GraphNode arch ->
@@ -1044,8 +1044,8 @@ queueAncestors :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGr
 queueAncestors priority nd pg = 
   snd $ Set.foldr (queueNode' priority) (Set.singleton nd, pg) (getBackEdgesFrom pg nd)
 
-queueNode :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
-queueNode priority nd__ pg__ = snd $ queueNode' priority nd__ (Set.empty, pg__)
+queueNode :: NodePriority -> GraphNode' arch qbin -> PairGraph sym arch -> PairGraph sym arch
+queueNode priority nd__ pg__ = withKnownBin nd__ $ snd $ queueNode' priority (Qu.coerceToExists nd__) (Set.empty, pg__)
 
 -- | Calls 'queueNode' for 'ProcessNode' work items.
 --   For 'ProcessMerge' work items, queues up the merge if
@@ -1072,7 +1072,7 @@ queueWorkItem priority wi pg = case wi of
     Just{} -> addItemToWorkList wi priority pg
     Nothing -> queueNode priority (singleNodeDivergence sne) pg
 
-queueSplitAnalysis :: NodePriority -> NodeEntry arch -> PairGraphM sym arch ()
+queueSplitAnalysis :: NodePriority -> NodeEntry' arch qbin -> PairGraphM sym arch ()
 queueSplitAnalysis priority ne = do
   sneO <- toSingleNodeEntry PBi.OriginalRepr ne
   sneP <- toSingleNodeEntry PBi.PatchedRepr ne
@@ -1240,8 +1240,10 @@ hasWorkLeft pg = case RevMap.minView_value (pairGraphWorklist pg) of
   Just{} -> True
 
 isDivergeNode ::
-  GraphNode arch -> PairGraph sym arch -> Bool
-isDivergeNode nd pg = Map.member nd (pairGraphSyncData pg)
+  GraphNode' arch qbin -> PairGraph sym arch -> Bool
+isDivergeNode nd pg = withKnownBin nd $ case Qu.convertQuant nd of
+  Just nd' -> Map.member nd' (pairGraphSyncData pg)
+  Nothing -> False
 
 -- | Given a pair graph, chose the next node in the graph to visit
 --   from the work list, updating the necessary bookeeping.  If the
@@ -1387,7 +1389,7 @@ pgMaybe msg Nothing = throwError $ PEE.PairGraphErr msg
 
 -- | Compute a merged node for two diverging nodes
 -- FIXME: do we need to support mismatched node kinds here?
-combineNodes :: SingleNodeEntry arch bin -> SingleNodeEntry arch (PBi.OtherBinary bin) -> Maybe (GraphNode arch)
+combineNodes :: SingleNodeEntry arch bin -> SingleNodeEntry arch (PBi.OtherBinary bin) -> Maybe (GraphNode' arch Qu.AllK)
 combineNodes node1 node2 = do
   let ndPair = PPa.mkPair (singleEntryBin node1) (Qu.AsSingle node1) (Qu.AsSingle node2)
   Qu.AsSingle nodeO <- PPa.get PBi.OriginalRepr ndPair
@@ -1581,11 +1583,11 @@ isSyncExit sne blkt@(PB.BlockTarget{}) = do
     True -> return Nothing
     False -> isCutAddressFor (GraphNode sne) (PB.targetRawPC blkt) >>= \case
       True -> do
-        let sne_tgt = mkSingleNodeEntry (singleToNodeEntry sne) (PB.targetCall blkt)
+        let sne_tgt = mkSingleNodeEntry sne (PB.targetCall blkt)
         return $ Just $ SyncAtExit sne sne_tgt
       False -> case PB.targetReturn blkt of
         Just ret -> do
-          let sne_tgt = mkSingleNodeEntry (singleToNodeEntry sne) ret
+          let sne_tgt = mkSingleNodeEntry sne ret
           let sync = SyncAtExit sne sne_tgt
           -- special case where this block target
           -- has already been marked as a sync exit for this node, but
@@ -1672,7 +1674,7 @@ addReturnPointSync priority ne blktPair = case asSingleNodeEntry ne of
         case (not isExcept) &&
           Set.member (PPa.WithBin (singleEntryBin sne) (PB.concreteAddress ret)) cuts of
             True -> do
-              let syncExit = mkSingleNodeEntry (singleToNodeEntry sne) ret
+              let syncExit = mkSingleNodeEntry sne ret
               queueExitMerges priority (SyncAtExit sne syncExit)
             False -> return ()
       Nothing -> return ()
