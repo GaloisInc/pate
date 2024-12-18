@@ -33,6 +33,7 @@ module Pate.Monad.PairGraph
   , runPG
   , execPG
   , liftPartEqM_
+  , lookupFnBindings
   ) where
 
 import           Control.Monad.State.Strict
@@ -42,8 +43,10 @@ import           Control.Monad (foldM, forM_)
 import qualified Control.Monad.IO.Unlift as IO
 import           Data.Functor.Const
 import           Data.Maybe (fromMaybe)
+import           Control.Lens ( (&), (.~), (^.), (%~) )
 
 import qualified Data.Parameterized.TraversableF as TF
+import qualified Data.Parameterized.Map as MapF
 import           Data.Parameterized.Some
 
 import           SemMC.Formula.Env (SomeSome(..))
@@ -65,6 +68,10 @@ import qualified Pate.Equivalence.Error as PEE
 import GHC.Stack (HasCallStack)
 import qualified Prettyprinter as PP
 import qualified What4.Interface as W4
+import qualified Pate.Verification.FnBindings as PFn
+import qualified What4.Concrete as W4
+import qualified Data.Quant as Qu
+
 
 instance IsTraceNode (k :: l) "pg_trace" where
   type TraceNodeType k "pg_trace" = [String]
@@ -201,14 +208,11 @@ initialDomainSpec ::
   GraphNode arch ->
   EquivM sym arch (PAD.AbstractDomainSpec sym arch)
 initialDomainSpec (GraphNodeEntry blocks) = withTracing @"function_name" "initialDomainSpec" $ 
-  withFreshVars blocks $ \_vars -> do
-    dom <- initialDomain
-    return (mempty, dom)
+  withFreshVars blocks $ \_vars -> initialDomain
 initialDomainSpec (GraphNodeReturn fPair) = withTracing @"function_name" "initialDomainSpec" $ do
   let blocks = PPa.map PB.functionEntryToConcreteBlock fPair
-  withFreshVars blocks $ \_vars -> do
-    dom <- initialDomain
-    return (mempty, dom)
+  withFreshVars blocks $ \_vars -> initialDomain
+
 
 getScopedCondition ::
   PS.SimScope sym arch v ->
@@ -218,7 +222,7 @@ getScopedCondition ::
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
 getScopedCondition scope pg nd condK = withSym $ \sym -> case getCondition pg nd condK of
   Just condSpec -> do
-    (_, eqCond) <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
+    eqCond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
     return eqCond
   Nothing -> return $ PEC.universal sym
 
@@ -324,3 +328,14 @@ runPendingActions lens edge result pg0 = do
   case didchange of
     True -> return $ Just pg1
     False -> return Nothing
+
+lookupFnBindings ::
+  PS.SimScope sym arch v ->
+  SingleGraphNode arch bin ->
+  PairGraph sym arch ->
+  EquivM sym arch (Maybe (PFn.FnBindings sym bin v))
+lookupFnBindings scope sne pg = withSym $ \sym -> case MapF.lookup (Qu.AsSingle sne) (pg ^. (syncData dp . syncBindings)) of
+  Just (PS.AbsT bindsSpec) -> Just <$> (IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) bindsSpec)
+  Nothing -> return Nothing
+  where
+    dp = singleNodeDivergePoint sne

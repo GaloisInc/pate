@@ -22,6 +22,7 @@ module Pate.Verification.Simplify (
   , coreStrategy
   , applySimpStrategy
   , unfoldDefsStrategy
+  , rewriteStrategy
   ) where
 
 import           Control.Monad (foldM)
@@ -46,6 +47,7 @@ import           What4.ExprHelpers (Simplifier, SimpStrategy)
 import           Pate.TraceTree
 import qualified Data.Set as Set
 import Pate.AssumptionSet
+import qualified Data.Parameterized.Map as MapF
 
 -- | Under the current assumptions, attempt to collapse a predicate
 -- into either trivially true or false
@@ -304,3 +306,10 @@ emitIfChanged ::
 emitIfChanged msg e1 e2 = case W4.testEquality e1 e2 of
   Just W4.Refl -> return ()
   Nothing -> emitTraceLabel @"expr" msg (Some e2) >> return ()
+
+type ExprBindings sym = MapF.MapF (W4.SymExpr sym) (W4.SymExpr sym)
+
+rewriteStrategy :: ExprBindings sym -> SimpStrategy sym (EquivM_ sym arch)
+rewriteStrategy binds = WEH.joinStrategy $ withValid $ return $ WEH.SimpStrategy $ \sym _check -> do
+  cache <- IO.liftIO $ WEH.freshVarBindCache
+  return $ WEH.Simplifier $ \e -> IO.liftIO $ WEH.applyExprBindings' sym cache binds e
