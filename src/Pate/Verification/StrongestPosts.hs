@@ -586,8 +586,6 @@ initSingleSidedDomain ::
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
 initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ withSym $ \sym -> withPG_ pg0 $ do
-  priority <- lift $ thisPriority
-  
   let dp = singleNodeDivergePoint (GraphNode sne)
   let nd = Qu.coerceToExists dp
   nd' <- case Qu.convertQuant nd of
@@ -611,28 +609,33 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
     mbindsThis <- lift $ lookupFnBindings scope (GraphNode sne) pg0
     mbindsOther <- lift $ lookupFnBindings scope sne_other pg0
 
-
-
-    let do_widen pg = do
-          pr <- currentPriority
-          atPriority (raisePriority pr) (Just "Starting Split Analysis") $
-            withGraphNode' scope nd bundle dom pg $ 
-              widenAlongEdge scope bundle nd dom_single pg nd_single
-    
-    let rewrite_assert exprBinds pg = case getCondition pg nd ConditionAsserted of
+    let rewrite_assert exprBinds pg = fnTrace "rewrite_assert" $ case getCondition pg nd ConditionAsserted of
           Just condSpec -> do
             cond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
             cond' <- PSi.applySimpStrategy (PSi.rewriteStrategy exprBinds) cond
             let condSpec' = PS.mkSimSpec scope cond'
             return $ setCondition nd ConditionAsserted PropagateFull condSpec' pg
           Nothing -> return pg
+
+    let do_widen binds pg = fnTrace "do_widen" $ do
+          pr <- currentPriority
+          atPriority (raisePriority pr) (Just "Starting Split Analysis") $ do
+            pg2 <- propagateOne scope bundle nd nd_single ConditionAsserted pg >>= \case
+              Just pg1 -> rewrite_assert binds pg1
+              Nothing -> return pg
+            
+            withAssumptionSet (PAS.fromExprBindings binds) $ withGraphNode' scope nd bundle dom pg2 $ do
+              widenAlongEdge scope bundle nd dom_single pg2 nd_single
+
           
     case (mbindsThis, mbindsOther) of
 
       (Just bindsThis, Just bindsOther) -> do
+        emitTrace @"debug" "Case: Bindings on both sides"
         binds <- IO.liftIO $ WEH.mergeBindings sym (PFn.toExprBindings bindsThis) (PFn.toExprBindings bindsOther) 
-        liftEqM_ $ \pg -> (withAssumptionSet (PAS.fromExprBindings binds) $ do_widen pg) >>= rewrite_assert binds
+        liftEqM_ $ \pg -> do_widen binds pg
       (Just{}, Nothing) -> do
+        emitTrace @"debug" "Case: Bindings on only this side"
         pr <- lift $ currentPriority
         -- Should we lower the priority here? Is it possible to get caught in a loop otherwise?
         -- Formally we should be able to find all relevant nodes based on which bindings
@@ -642,10 +645,12 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
           modify $ queueAncestors pr (GraphNode $ singleToNodeEntry (syncPointNode sp))
  
       (Nothing, Just bindsOther) -> do
+        emitTrace @"debug" "Case: Bindings on only other side"
         let binds = PFn.toExprBindings bindsOther
-        liftEqM_ $ \pg -> 
-          (withAssumptionSet (PAS.fromExprBindings binds) $ do_widen pg) >>= rewrite_assert binds
-      (Nothing, Nothing) -> liftEqM_ do_widen
+        liftEqM_ $ \pg -> do_widen binds pg
+      (Nothing, Nothing) -> do
+        emitTrace @"debug" "Case: No bindings"
+        liftEqM_ $ do_widen MapF.empty
     
     return (PS.WithScope ())
   where
