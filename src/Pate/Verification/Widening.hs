@@ -863,9 +863,12 @@ propagateBindings scope bundle from to gr0 = withSym $ \sym -> case (asSingleNod
                     Just False -> do
                       emitTraceLabel @"expr" (ExprLabel $ "Proved bindings") (Some toBindsPred)
                       return Nothing
-                    _ -> do
+                    _ -> withTracing @"message" "Fail to prove bindings" $ do
+                      emitTraceLabel @"expr" (ExprLabel $ "To Bindings") (Some toBindsPred)
+                      emitTraceLabel @"expr" (ExprLabel $ "From Bindings") (Some fromBindsPred)
                       -- FIXME: use 'addFnBindings' instead? needs to take a mux condition
                       pathCond <- scopedPathCondition scope
+                      emitTraceLabel @"expr" (ExprLabel $ "Path Condition") (Some (PS.unSE pathCond))
                       bindsCombined <- IO.liftIO $ PFn.mux sym pathCond toBinds fromBinds
                       return $ Just $ gr0 & (syncData dp . syncBindings) %~ MapF.insert (Qu.AsSingle fromS) (PS.AbsT $ PS.mkSimSpec scope bindsCombined)
               -- 'from' has no binds so we propagate unconditionally
