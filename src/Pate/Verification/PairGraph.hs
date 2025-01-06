@@ -69,7 +69,6 @@ module Pate.Verification.PairGraph
   , dropPostDomains
   , markEdge
   , getBackEdgesFrom
-  , combineNodes
   , NodePriority(..)
   , addToWorkList
   , WorkItem(ProcessNode, ProcessSplit)
@@ -1387,20 +1386,7 @@ pgMaybe msg Nothing = throwError $ PEE.PairGraphErr msg
 
 
 
--- | Compute a merged node for two diverging nodes
--- FIXME: do we need to support mismatched node kinds here?
-combineNodes :: SingleNodeEntry arch bin -> SingleNodeEntry arch (PBi.OtherBinary bin) -> Maybe (GraphNode' arch Qu.AllK)
-combineNodes node1 node2 = do
-  let ndPair = PPa.mkPair (singleEntryBin node1) (Qu.AsSingle node1) (Qu.AsSingle node2)
-  Qu.AsSingle nodeO <- PPa.get PBi.OriginalRepr ndPair
-  Qu.AsSingle nodeP <- PPa.get PBi.PatchedRepr ndPair
-  -- it only makes sense to combine nodes that share a divergence point,
-  -- where that divergence point will be used as the calling context for the
-  -- merged point
-  let divergeO = singleNodeDivergence nodeO
-  let divergeP = singleNodeDivergence nodeP
-  guard $ divergeO == divergeP
-  return $ GraphNode $ mkMergedNodeEntry divergeO (singleNodeBlock nodeO) (singleNodeBlock nodeP)
+
 
 nodeToSingleRepr :: GraphNode arch -> Maybe (Some (PBi.WhichBinaryRepr))
 nodeToSingleRepr nd = case graphNodeBlocks nd of

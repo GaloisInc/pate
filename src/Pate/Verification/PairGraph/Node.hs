@@ -52,6 +52,7 @@ module Pate.Verification.PairGraph.Node (
   , isSingleReturn
   , splitGraphNode
   , getDivergePoint
+  , getDivergePoint'
   , eqUptoDivergePoint
   , mkMergedNodeEntry
   , mkMergedNodeReturn
@@ -123,7 +124,9 @@ instance OrdF (GraphNode' arch) where
 
 coerceContext :: Qu.QuantCoercion t1 t2 -> GraphNode' arch t1 -> CallingContext' arch t1 -> CallingContext' arch t2
 coerceContext qc nd x@(CallingContext' cctx dp) = case qc of
-  Qu.CoerceAllToOne repr -> CallingContext' cctx (DivergePointSingle repr nd)
+  Qu.CoerceAllToOne repr -> case divergePoint' (nodeContext nd) of
+    DivergePoint nd' -> CallingContext' cctx (DivergePointSingle repr nd')
+    NoDivergePoint -> CallingContext' cctx (DivergePointSingle repr nd)
   Qu.CoerceToExists _ -> CallingContext' cctx (divergePointExists dp)
   Qu.CoerceRefl{} -> x
 
@@ -331,10 +334,12 @@ instance PA.ValidArch arch => JSON.ToJSON (CallingContext' arch qbin) where
   toJSON (CallingContext bps mdivisionPoint) = JSON.object [ "ancestors" JSON..= bps, "divergedAt" JSON..= divergePointNode mdivisionPoint]
 
 getDivergePoint :: GraphNode arch -> Maybe (GraphNode arch)
-getDivergePoint nd = case nodeContext nd of
-  CallingContext _ (DivergePoint dp) -> Just (Qu.coerceQuant dp)
-  CallingContext _ NoDivergePoint -> Nothing
+getDivergePoint nd = fmap Qu.coerceQuant $ getDivergePoint' nd
 
+getDivergePoint' :: GraphNode' arch qbin -> Maybe (GraphNode' arch Qu.AllK)
+getDivergePoint' nd = case nodeContext nd of
+  CallingContext _ (DivergePoint dp) -> Just dp
+  CallingContext _ NoDivergePoint -> Nothing
 
 rootEntry :: PPa.PatchPair (PB.ConcreteBlock arch) -> NodeEntry arch
 rootEntry pPair = NodeEntry (CallingContext [] (SomeDivergePoint Nothing)) pPair
@@ -624,16 +629,6 @@ singleToNodeEntry sne = case singleToGraphNode (GraphNode sne) of
 singleToGraphNode :: SingleGraphNode arch bin -> GraphNode arch
 singleToGraphNode sgn = withRepr (singleNodeRepr sgn) $ Qu.coerceQuant sgn
 
-combineSingleEntries' :: 
-  SingleNodeEntry arch PB.Original -> 
-  SingleNodeEntry arch PB.Patched ->
-  Maybe (NodeEntry arch)
-combineSingleEntries' (SingleNodeEntry cctxO blksO) (SingleNodeEntry cctxP blksP) = do
-  divergeO <- divergePoint $ cctxO
-  divergeP <- divergePoint $ cctxP
-  guard $ divergeO == divergeP
-  return $ mkNodeEntry' (Qu.coerceQuant divergeO) (PPa.PatchPair blksO blksP)
-
 -- | Create a combined two-sided 'NodeEntry' based on
 --   a pair of single-sided entries. The given entries
 --   must have the same diverge point (returns 'Nothing' otherwise),
@@ -642,11 +637,21 @@ combineSingleEntries' (SingleNodeEntry cctxO blksO) (SingleNodeEntry cctxP blksP
 --   the either single-sided analysis is discarded)
 combineSingleEntries :: 
   SingleNodeEntry arch bin -> 
-  SingleNodeEntry arch (PB.OtherBinary bin) ->
+  SingleNodeEntry arch (PB.OtherBinary bin) -> 
   Maybe (NodeEntry arch)
-combineSingleEntries sne1 sne2 = case singleEntryBin sne1 of
-  PB.OriginalRepr -> combineSingleEntries' sne1 sne2
-  PB.PatchedRepr -> combineSingleEntries' sne2 sne1
+combineSingleEntries node1 node2 = do
+  let ndPair = PPa.mkPair (singleEntryBin node1) (Qu.AsSingle node1) (Qu.AsSingle node2)
+  Qu.AsSingle nodeO <- PPa.get PB.OriginalRepr ndPair
+  Qu.AsSingle nodeP <- PPa.get PB.PatchedRepr ndPair
+  -- it only makes sense to combine nodes that share a divergence point,
+  -- where that divergence point will be used as the calling context for the
+  -- merged point
+  let divergeO = singleNodeDivergence nodeO
+  let divergeP = singleNodeDivergence nodeP
+  guard $ divergeO == divergeP
+  let ne = mkMergedNodeEntry divergeO (singleNodeBlock nodeO) (singleNodeBlock nodeP)
+  GraphNode ne' <- return $ Qu.coerceToExists (GraphNode ne)
+  return ne'
 
 type SingleNodeReturn arch bin = NodeReturn' arch (Qu.OneK bin)
 
