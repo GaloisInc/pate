@@ -855,19 +855,38 @@ withWorkItem gr0 f = do
       let nd = workItemNode wi
       res <- subTraceLabel @"node" (printPriorityKind priority) nd $ atPriority priority Nothing $ do
         (mnext, gr2) <- case wi of
-          ProcessNode (GraphNode ne) | Just (Some (Qu.AsSingle sne)) <- asSingleNodeEntry ne -> do
+          ProcessNode True (GraphNode ne) | Just (Some (Qu.AsSingle sne)) <- asSingleNodeEntry ne -> do
             (evalPG gr1 $ isSyncNode sne) >>= \case
               True -> do
                 gr2 <- execPG gr1 $ queueExitMerges (\pk -> mkPriority pk priority) (SyncAtStart sne)
                 return $ (Nothing, gr2)
               False -> processNode (GraphNode ne) gr1
-          ProcessNode nd' -> processNode nd' gr1
+          ProcessNode True nd' -> do
+            emitTrace @"debug" $ "ProcessNode: " ++ show nd'
+            p <- thisPriority
+            (isSync, gr2) <- (runPG gr1 $ queueSyncNodeMerge p nd')
+            case isSync of
+              True -> do
+                emitTrace @"debug" $ "Sync node found, scheduling merge"
+                return (Nothing, gr2)
+              False -> processNode nd' gr1
+          ProcessNode False nd' -> do
+            emitTrace @"debug" $ "ProcessNode: (no merge)" ++ show nd'
+            processNode nd' gr1
           ProcessSplit sne -> do
             emitTrace @"debug" $ "ProcessSplit: " ++ show sne
             handleProcessSplit sne gr1
           ProcessMerge sneO sneP -> do
             emitTrace @"debug" $ "ProcessMerge: " ++ show sneO ++ " vs. " ++ show sneP
-            handleProcessMerge sneO sneP gr1
+            (mnext, gr2) <- handleProcessMerge sneO sneP gr1
+            case mnext of
+              Just next -> do
+                  emitTrace @"debug" $ "Drop and re-queue: " ++ show next
+                  let gr3 = queueWorkItem priority (ProcessNode False next) $ dropWorkItem (ProcessNode True next) gr2
+                  return $ (Nothing, gr3)
+              Nothing -> do
+                emitTrace @"debug" $ "No merge possible"
+                return (Nothing, gr2)
         case (mnext, getCurrentDomain gr2 nd) of
           (Just next, Just spec) | next == nd -> fmap Right $ f (priority, gr2, wi, spec)
           _ -> return $ Left (mnext, gr2)
@@ -3037,7 +3056,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
           -- this allows, for example, the analysis to determine
           -- that this is unreachable (potentially after refinements) and therefore
           -- doesn't need synchronization
-          Just pg1 <- return $ addToWorkList someDivergeNode (priority PriorityDeferred) pg
+          Just pg1 <- return $ addToWorkList True someDivergeNode (priority PriorityDeferred) pg
           return $ st'{ branchGraph = pg1 }
         AlignControlFlow condK -> withSym $ \sym -> do
           traces <- bundleToInstrTraces bundle

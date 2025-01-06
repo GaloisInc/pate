@@ -137,6 +137,7 @@ module Pate.Verification.PairGraph
   , initFnBindings
   , addFnBindings
   , getAllSyncPoints
+  , queueSyncNodeMerge
   ) where
 
 import           Prettyprinter
@@ -335,8 +336,9 @@ type WorkList arch = RevMap (WorkItem arch) NodePriority
 -- | Operations that can be a scheduled and handled
 --   at the top-level.
 data WorkItem arch = 
-  -- | Handle all normal node processing logic
-    ProcessNode (GraphNode arch)
+  -- | Handle all normal node processing logic. Boolean flag indicates if
+  --   additional processing should be scheduled to handled control flow diverge/convergence.
+    ProcessNode { _handleMerge :: Bool, _workItemNode :: GraphNode arch }
   -- | Handle merging two single-sided analyses (both nodes must share a diverge point)
   | ProcessMergeAtExitsCtor
       (SingleNodeEntry arch PBi.Original) 
@@ -352,7 +354,7 @@ deriving instance Ord (WorkItem arch)
 
 instance PA.ValidArch arch => Show (WorkItem arch) where
   show = \case
-    ProcessNode nd -> "ProcessNode " ++ show nd
+    ProcessNode handleMerge nd -> "ProcessNode " ++ if handleMerge then "" else "(no merge) " ++ show nd
     ProcessMergeAtEntry sneO sneP -> "ProcessMergeAtEntry " ++ show sneO ++ " vs. " ++ show sneP
     ProcessMergeAtExits sneO sneP -> "ProcessMergeAtExits " ++ show sneO ++ " vs. " ++ show sneP
     ProcessSplit sne -> "ProcessSplit " ++ show sne
@@ -717,7 +719,7 @@ mkProcessSplit sne = do
 
 workItemNode :: WorkItem arch -> GraphNode arch
 workItemNode = \case
-  ProcessNode nd -> nd
+  ProcessNode _ nd -> nd
   ProcessMerge spO spP -> case combineSingleEntries spO spP of
     Just merged -> GraphNode merged
     Nothing -> panic Verifier "workItemNode" ["Unexpected mismatched single-sided nodes"]
@@ -1019,7 +1021,7 @@ dropDomain nd priority pg = case getCurrentDomain pg nd of
       pg' = case Set.null (getBackEdgesFrom pg nd) of
         -- don't drop the domain for a toplevel entrypoint, but mark it for
         -- re-analysis
-        True -> pg { pairGraphWorklist = RevMap.insertWith (min) (ProcessNode nd) priority (pairGraphWorklist pg) }
+        True -> pg { pairGraphWorklist = RevMap.insertWith (min) (ProcessNode True nd) priority (pairGraphWorklist pg) }
         False -> pg { pairGraphDomains = Map.delete nd (pairGraphDomains pg), 
                       pairGraphWorklist = dropNodeFromWorkList nd (pairGraphWorklist pg)
                     }
@@ -1041,10 +1043,20 @@ queueEntryPoints priority pg =
 
 queueAncestors :: NodePriority -> GraphNode arch -> PairGraph sym arch -> PairGraph sym arch
 queueAncestors priority nd pg = 
-  snd $ Set.foldr (queueNode' priority) (Set.singleton nd, pg) (getBackEdgesFrom pg nd)
+  snd $ Set.foldr (queueNode' priority True) (Set.singleton nd, pg) (getBackEdgesFrom pg nd)
 
 queueNode :: NodePriority -> GraphNode' arch qbin -> PairGraph sym arch -> PairGraph sym arch
-queueNode priority nd__ pg__ = withKnownBin nd__ $ snd $ queueNode' priority (Qu.coerceToExists nd__) (Set.empty, pg__)
+queueNode priority nd__ pg__ = queueNode'' priority True nd__ pg__
+
+queueNode'' :: 
+  NodePriority -> 
+  Bool {- ^ true if control flow merge processing should occur when node is handled -} -> 
+  GraphNode' arch qbin -> 
+  PairGraph sym arch -> 
+  PairGraph sym arch
+queueNode'' priority handleMerge nd__ pg__ = 
+  withKnownBin nd__ $ snd $ queueNode' priority handleMerge (Qu.coerceToExists nd__) (Set.empty, pg__)
+
 
 -- | Calls 'queueNode' for 'ProcessNode' work items.
 --   For 'ProcessMerge' work items, queues up the merge if
@@ -1054,7 +1066,7 @@ queueNode priority nd__ pg__ = withKnownBin nd__ $ snd $ queueNode' priority (Qu
 --   it has a domain, otherwise queues the source (two-sided) diverging node. 
 queueWorkItem :: NodePriority -> WorkItem arch -> PairGraph sym arch -> PairGraph sym arch
 queueWorkItem priority wi pg = case wi of
-  ProcessNode nd -> queueNode priority nd pg
+  ProcessNode handleMerge nd -> queueNode'' priority handleMerge nd pg
   ProcessMerge spO spP -> 
     let 
       neO = GraphNode (singleToNodeEntry spO)
@@ -1082,14 +1094,19 @@ queueSplitAnalysis priority ne = do
 
 -- | Adds a node to the work list. If it doesn't have a domain, queue its ancestors.
 --   Takes a set of nodes that have already been considerd, and returns all considered nodes
-queueNode' :: NodePriority -> GraphNode arch -> (Set (GraphNode arch), PairGraph sym arch) -> (Set (GraphNode arch), PairGraph sym arch)
-queueNode' priority nd_ (considered, pg_) = case Set.member nd_ considered of
+queueNode' :: 
+  NodePriority -> 
+  Bool {- ^ true if control flow merge processing should occur when node is handled -} -> 
+  GraphNode arch -> 
+  (Set (GraphNode arch), PairGraph sym arch) -> 
+  (Set (GraphNode arch), PairGraph sym arch)
+queueNode' priority handleMerge nd_ (considered, pg_) = case Set.member nd_ considered of
   True -> (considered, pg_)
-  False -> case addToWorkList nd_ priority pg_ of
+  False -> case addToWorkList handleMerge nd_ priority pg_ of
     Just pg' -> (Set.insert nd_ considered, pg')
     -- if this node has no defined domain (i.e it was dropped as part of the previous
     -- step) then we consider further ancestors
-    Nothing -> Set.foldr' (queueNode' priority) (Set.insert nd_ considered, pg_) (getBackEdgesFrom pg_ nd_)
+    Nothing -> Set.foldr' (queueNode' priority handleMerge) (Set.insert nd_ considered, pg_) (getBackEdgesFrom pg_ nd_)
 
 getCondition ::
   PairGraph sym arch ->
@@ -1322,7 +1339,7 @@ updateDomain' ::
   PairGraph sym arch
 updateDomain' gr pFrom pTo d priority = markEdge pFrom pTo $ gr
   { pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-  , pairGraphWorklist = RevMap.insertWith (min) (ProcessNode pTo) priority (pairGraphWorklist gr)
+  , pairGraphWorklist = RevMap.insertWith (min) (ProcessNode True pTo) priority (pairGraphWorklist gr)
   , pairGraphEdges = Map.insertWith Set.union pFrom (Set.singleton pTo) (pairGraphEdges gr)
   , pairGraphBackEdges = Map.insertWith Set.union pTo (Set.singleton pFrom) (pairGraphBackEdges gr)
   }
@@ -1378,7 +1395,7 @@ addReturnVector gr funPair retPair priority =
     f Nothing  = Just (Set.singleton retPair)
     f (Just s) = Just (Set.insert retPair s)
 
-    wl = RevMap.insertWith (min) (ProcessNode (ReturnNode funPair)) priority (pairGraphWorklist gr)
+    wl = RevMap.insertWith (min) (ProcessNode True (ReturnNode funPair)) priority (pairGraphWorklist gr)
 
 pgMaybe :: String -> Maybe a -> PairGraphM sym arch a
 pgMaybe _ (Just a) = return a
@@ -1401,12 +1418,13 @@ tryPG f = catchError (Just <$> f) (\_ -> return Nothing)
 -- | Add a node back to the worklist to be re-analyzed if there is
 --   an existing abstract domain for it. Otherwise return Nothing.
 addToWorkList ::
+  Bool {- ^ true if control flow merge processing should occur when node is handled -} -> 
   GraphNode arch ->
   NodePriority ->
   PairGraph sym arch ->
   Maybe (PairGraph sym arch)  
-addToWorkList nd priority gr = case getCurrentDomain gr nd of
-  Just{} -> Just $ addItemToWorkList (ProcessNode nd) priority gr
+addToWorkList handleMerge nd priority gr = case getCurrentDomain gr nd of
+  Just{} -> Just $ addItemToWorkList (ProcessNode handleMerge nd) priority gr
   Nothing -> Nothing
 
 -- | Add a work item to the worklist to be processed
@@ -1444,7 +1462,7 @@ freshDomain ::
   PairGraph sym arch
 freshDomain gr pTo priority d =
   gr{ pairGraphDomains  = Map.insert pTo d (pairGraphDomains gr)
-    , pairGraphWorklist = RevMap.insertWith (min) (ProcessNode pTo) priority (pairGraphWorklist gr)
+    , pairGraphWorklist = RevMap.insertWith (min) (ProcessNode True pTo) priority (pairGraphWorklist gr)
     }
 
 initDomain ::
@@ -1607,7 +1625,7 @@ filterSyncExits ::
   WorkItem arch ->
   [PPa.PatchPair (PB.BlockTarget arch)] ->
   PairGraphM sym arch [PPa.PatchPair (PB.BlockTarget arch)]
-filterSyncExits _ (ProcessNode (ReturnNode{})) _ = fail "Unexpected ReturnNode work item"
+filterSyncExits _ (ProcessNode _ (ReturnNode{})) _ = fail "Unexpected ReturnNode work item"
 filterSyncExits _ (ProcessMergeAtExits sneO sneP) blktPairs = do
   let isSyncExitPair blktPair = do
         blktO <- PPa.get PBi.OriginalRepr blktPair
@@ -1632,12 +1650,13 @@ filterSyncExits priority (ProcessSplit sne) blktPairs = pgValid $ do
             return $ Set.member blkt desyncExits
       x <- filterM isDesyncExitPair blktPairs
       return x
-filterSyncExits priority (ProcessNode (GraphNode ne)) blktPairs = case asSingleNodeEntry ne of
+filterSyncExits priority (ProcessNode _ (GraphNode ne)) blktPairs = case asSingleNodeEntry ne of
   Nothing -> return blktPairs
   Just (Some (Qu.AsSingle sne)) -> do
     let bin = singleEntryBin sne
     blkts <- mapM (PPa.get bin) blktPairs
     syncExits <- catMaybes <$> mapM (isSyncExit sne) blkts
+    -- TODO: should we only queue exit merges if 'handleMerge' from 'ProcessNode' is set?
     forM_ syncExits $ \exit -> queueExitMerges priority exit
     return blktPairs
 
@@ -1715,3 +1734,27 @@ handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
       True -> queueExitMerges priority (SyncAtStart sne)
       False -> return ()
   Nothing -> return ()
+
+
+-- | Queue all sync points that correspond to this node.
+--   Returns False if the given node is not a sync point.
+queueSyncNodeMerge :: 
+  forall sym arch qbin.
+  (NodePriorityK -> NodePriority) -> 
+  GraphNode' arch qbin -> 
+  PairGraphM sym arch Bool
+queueSyncNodeMerge priority node = fmap (fromMaybe False) <$> tryPG $ do
+  dp <- pgMaybe "getDivergePoint" $ getDivergePoint' node
+  GraphNode node' <- toTwoSidedNode node
+
+  syncO <- getSyncData syncPoints PBi.OriginalRepr dp
+  syncP <- getSyncData syncPoints PBi.PatchedRepr dp
+
+  GraphNode (sneO :: SingleNodeEntry arch PBi.Original) <- return $ Qu.coerceQuant (GraphNode node')
+  GraphNode (sneP :: SingleNodeEntry arch PBi.Patched) <- return $ Qu.coerceQuant (GraphNode node')
+
+  let hasO = filter (\sp -> syncPointNode sp == sneO) (Set.toList syncO)
+  let hasP = filter (\sp -> syncPointNode sp == sneP) (Set.toList syncP)
+  let syncs = [(x,y) | x <- hasO, y <- hasP]
+  forM_ syncs $ \(x,y) -> queueSyncPoints priority x y
+  return $ not (null syncs)
