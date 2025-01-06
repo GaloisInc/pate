@@ -38,8 +38,9 @@ Functionality for handling the inputs and outputs of crucible.
 module Pate.SimState
   ( -- simulator state
     SimState(..)
-  , StackBase(..)
+  , StackBase
   , freshStackBase
+  , nextStackBase
   , SimInput(..)
   , SimOutput(..)
   , type VarScope
@@ -83,6 +84,7 @@ module Pate.SimState
   , simOutRegs
   , simPair
   , simSP
+  , simPC
   -- variable binding
   , SimVars(..)
   , bindSpec
@@ -109,6 +111,7 @@ import qualified Prettyprinter as PP
 
 import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
+import           Data.Parameterized.Context  ( pattern (:>) )
 import qualified Data.Parameterized.Context as Ctx
 import qualified Data.Parameterized.Map as MapF
 import qualified Data.Parameterized.TraversableF as TF
@@ -141,6 +144,8 @@ import           Pate.AssumptionSet
 import           Pate.TraceTree
 
 import           Data.Coerce ( coerce ) 
+import qualified Data.Parameterized.TraversableFC as TFC
+import qualified What4.UninterpFns as W4U
 
 ------------------------------------
 -- Crucible inputs and outputs
@@ -169,6 +174,27 @@ data SimState sym arch (v :: VarScope) (bin :: PBi.WhichBinary) = SimState
 simSP :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
   PSR.MacawRegEntry sym (MT.BVType (MM.ArchAddrWidth arch))
 simSP st = (simRegs st) ^. (MM.boundValue MM.sp_reg)
+
+simPC :: MM.RegisterInfo (MM.ArchReg arch) => SimState sym arch v bin ->
+  PSR.MacawRegEntry sym (MT.BVType (MM.ArchAddrWidth arch))
+simPC st = (simRegs st) ^. (MM.boundValue MM.ip_reg)
+
+-- | By convention, the symbolic values in the register state
+--   for a 'SimState' should be scoped to the associated 'v'. 
+--   Although this is not reflected in the internal
+--   representation, 'scopedRegValue' recovers this by allowing register
+--   contents to be projected to an appropriately scoped 'ScopedExpr'.
+--   NB: The scoping rules are enforced by requiring that the projection
+--   from the 'MacawRegEntry' be valid over any expression builder, ensuring
+--   that out-of-scope expressions can't be used to define it.
+scopedRegValue ::
+  MM.RegisterInfo (MM.ArchReg arch) => 
+  SimState sym arch v bin -> 
+  MM.ArchReg arch tp -> 
+  (forall sym'. PSR.MacawRegEntry sym' tp -> W4.SymExpr sym' tp') ->
+  ScopedExpr sym tp' v
+scopedRegValue st reg f = ScopedExpr $ f (simRegs st ^. MM.boundValue reg)
+
 
 instance Scoped (PopT (SimState sym arch) bin) where
   unsafeCoerceScope (PopT s) = PopT (coerce s)
@@ -721,6 +747,20 @@ forScopedExpr ::
   IO (ScopedExpr sym tp2 v)
 forScopedExpr sym (ScopedExpr e1) f = ScopedExpr <$> f sym e1
 
+-- | Generalization of above that takes m to n scoped expressions.
+forScopedExprs ::
+  forall sym v ctx1 ctx2 m.
+  Functor m =>
+  W4.IsSymExprBuilder sym =>
+  sym ->
+  Ctx.Assignment (PopScope (ScopedExpr sym) v) ctx1 ->
+  (forall sym'. W4.IsSymExprBuilder sym' => sym' -> Ctx.Assignment (W4.SymExpr sym') ctx1 -> m (Ctx.Assignment (W4.SymExpr sym') ctx2)) ->
+  m (Ctx.Assignment (PopScope (ScopedExpr sym) v) ctx2)
+forScopedExprs sym scopedExprs f = 
+  let 
+    (exprs :: Ctx.Assignment (W4.SymExpr sym) ctx1) = TFC.fmapFC (\(PopScope e) -> unSE e) scopedExprs
+  in (\x -> TFC.fmapFC (\e -> PopScope (ScopedExpr e)) x) <$> f sym exprs
+
 -- | Similar to 'forScopedExpr' but may return a value as well
 forScopedExprRet ::
   W4.IsSymExprBuilder sym =>
@@ -927,8 +967,30 @@ freshStackBase ::
   PBi.WhichBinaryRepr bin ->
   Proxy arch ->
   IO (StackBase sym arch v)
-freshStackBase sym bin _arch = liftScope0 sym $ \sym' ->
+freshStackBase sym bin _arch = liftScope0 sym $ \sym' -> do
     W4.freshConstant sym' (W4.safeSymbol ("stack_base" ++ PBi.short bin)) (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+
+-- | Similar to 'freshStackBase' but defines the resulting stack base as an uninterpreted function
+--   of the given state's stack base and instruction pointer.
+nextStackBase ::
+  forall sym arch v bin.
+  W4.IsSymExprBuilder sym =>
+  MM.RegisterInfo (MM.ArchReg arch) =>
+  MM.MemWidth (MM.ArchAddrWidth arch) =>
+  sym ->
+  PBi.WhichBinaryRepr bin ->
+  SimState sym arch v bin ->
+  IO (StackBase sym arch v)
+nextStackBase sym bin st = do
+  let old_base = simStackBase st
+  let old_ip = scopedRegValue st MM.ip_reg (\re -> let CLM.LLVMPointer _ ip = PSR.macawRegValue re in ip)
+  (Ctx.Empty Ctx.:> PopScope stackBase) <- forScopedExprs sym (Ctx.Empty :> PopScope old_base :> PopScope old_ip) $ \sym' exprs -> do
+    let stackRepr = (W4.BaseBVRepr (MM.memWidthNatRepr @(MM.ArchAddrWidth arch)))
+    fn <- W4U.mkUninterpretedSymFn sym' ("stack_base" ++ PBi.short bin) (TFC.fmapFC W4.exprType exprs) stackRepr
+    e <- W4.applySymFn sym' fn exprs
+    return $ Ctx.singleton e
+  return stackBase
+
 
 ------------------------------------
 -- ExprMappable instances

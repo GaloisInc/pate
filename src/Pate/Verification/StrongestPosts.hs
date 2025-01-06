@@ -1780,8 +1780,10 @@ returnSiteBundle scope vars _preD pPair = withSym $ \sym -> do
   simOut_ <- PPa.forBins $ \bin -> do
     input <- PPa.get bin simIn_
     let inSt = PS.simInState input
-    postFrame <- liftIO $ PS.freshStackBase sym bin (Proxy @arch)
-    let postSt = inSt { PS.simStackBase = PS.simCallerStackBase inSt, PS.simCallerStackBase = postFrame }
+    let postSt_ = inSt { PS.simStackBase = PS.simCallerStackBase inSt }
+    postFrame <- liftIO $ PS.nextStackBase sym bin postSt_
+    let postSt = postSt_ { PS.simCallerStackBase = postFrame }
+
     return $ PS.SimOutput postSt blockEndVal
 
   bundle <- applyCurrentAsms $ SimBundle simIn_ simOut_
