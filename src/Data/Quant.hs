@@ -83,10 +83,13 @@ module Data.Quant
     , ExistsOrCases(..)
     , TheOneK
     , IfIsOneK
+    , IfIsOneKElse
+    , NotAllK
     , coerceExists
   ) where
 
 import           Prelude hiding (map, traverse)
+import           GHC.TypeLits (TypeError, ErrorMessage(..))
 
 import           Data.Kind (Type)
 import           Data.Constraint
@@ -110,6 +113,12 @@ data QuantK k = OneK k | ExistsK | AllK
 type OneK = 'OneK
 type ExistsK = 'ExistsK
 type AllK = 'AllK
+
+type family QuantKCases (tp :: QuantK k) (caseOne :: l) (caseExists :: l) (caseAll :: l) :: l where
+    QuantKCases (OneK _) k _ _ = k
+    QuantKCases AllK _ _ k = k
+    QuantKCases ExistsK _ k _ = k
+
 
 type KnownHasRepr (k0 :: k) = KnownRepr (ReprOf :: k -> Type) k0
 
@@ -487,10 +496,14 @@ instance QuantConvertible (Quant (f :: k -> Type)) where
 type family TheOneK (tp :: QuantK k) :: k where
     TheOneK (OneK k) = k
 
-type family IfIsOneK (tp :: QuantK k) (c :: Constraint) :: Constraint where
-    IfIsOneK (OneK k) c = c
-    IfIsOneK AllK c = ()
-    IfIsOneK ExistsK c = ()
+type family IfIsOneKElse (tp :: QuantK k) (cT :: Constraint) (cF :: Constraint) :: Constraint where
+    IfIsOneKElse (OneK k) cT _ = cT
+    IfIsOneKElse AllK _ cF = cF
+    IfIsOneKElse ExistsK _ cF = cF
+
+type IfIsOneK tp (c :: Constraint) = QuantKCases tp c (() :: Constraint) (() :: Constraint) 
+
+type NotAllK tp = QuantKCases tp (() :: Constraint) (() :: Constraint) (TypeError ('Text "NotAllK: Cannot match with AllK"))
 
 asQuantOne :: forall k (x :: k) f tp. HasReprK k => ReprOf x -> Quant (f :: k -> Type) (tp :: QuantK k) -> Maybe (Dict (KnownRepr QuantRepr tp), Dict (IfIsOneK tp (x ~ TheOneK tp)), ReprOf x, f x)
 asQuantOne repr = \case
@@ -511,10 +524,7 @@ data ExistsOrCases (tp1 :: QuantK k) (tp2 :: QuantK k) where
     ExistsOrRefl :: ExistsOrCases tp tp
     ExistsOrExists :: ExistsOrCases ExistsK tp
 
-type family IsExistsOrConstraint (tp1 :: QuantK k) (tp2 :: QuantK k) :: Constraint where
-  IsExistsOrConstraint (OneK x) tp = (OneK x ~ tp)
-  IsExistsOrConstraint (AllK :: QuantK k) tp = ((AllK :: QuantK k) ~ tp)
-  IsExistsOrConstraint ExistsK _ = ()
+type IsExistsOrConstraint (tp1 :: QuantK k) (tp2 :: QuantK k) = QuantKCases tp1 (tp1 ~ tp2)  (() :: Constraint) (tp1 ~ tp2)
 
 class (IsExistsOr tp1 tp1, IsExistsOr tp2 tp2, IsExistsOrConstraint tp1 tp2) => IsExistsOr (tp1 :: QuantK k) (tp2 :: QuantK k) where
     isExistsOr :: ExistsOrCases tp1 tp2
@@ -570,7 +580,7 @@ existsOrCases f g = case (isExistsOr :: ExistsOrCases tp tp') of
     ExistsOrRefl -> g
 
 -- | Pattern for creating or matching a singleton 'Quant', generalized over the existential cases
-pattern Single :: forall {k} f tp. (HasReprK k) => forall x. (IsExistsOr tp (OneK x), IfIsOneK tp (x ~ TheOneK tp), KnownRepr QuantRepr tp) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
+pattern Single :: forall {k} f tp. (HasReprK k) => forall x. (KnownRepr QuantRepr tp, IsExistsOr tp (OneK x), IfIsOneK tp (x ~ TheOneK tp)) => ReprOf x -> f x -> Quant (f :: k -> Type) tp
 pattern Single repr x <- (quantAsOne -> Just (QuantAsOneProof repr x))
     where
         Single (repr :: ReprOf x) x = existsOrCases @tp @(OneK x) (withRepr repr $ QuantExists (Single repr x)) (QuantOne repr x)
