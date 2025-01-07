@@ -605,6 +605,7 @@ class PateWrapper:
                         eqcond = item['val']
 
                         node_id = get_graph_node_id(node)
+                        predicate = eqcond['predicate']
 
                         if self.last_cfar_graph:
                             cfar_node = self.last_cfar_graph.get(node_id)
@@ -615,9 +616,9 @@ class PateWrapper:
 
                         # print('CFAR id:', node_id)
 
-                        # out.write(f'Equivalence condition for {node_id}\n')
-                        # pprint_symbolic(out, predicate)
-                        # out.write('\n')
+                        out.write(f'Equivalence condition for {node_id}\n')
+                        pprint_symbolic(out, predicate)
+                        out.write('\n')
 
                         # out.write('\nTrace True\n')
                         # pprint_node_event_trace(trace_true, 'True Trace', out=out)
@@ -810,7 +811,6 @@ class CFARNode:
         self.external_postdomain = None
         self.addr = None
         self.focus = False
-        self.traceConstraints = None
         self.instruction_trees = None
         self.wideningInfo = None
         self.observableDiffTrace = None

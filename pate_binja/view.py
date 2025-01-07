@@ -559,13 +559,15 @@ class PateCfarEqCondDialog(QDialog):
         with io.StringIO() as out:
             pate.pprint_symbolic(out, self.conditionTrace.unconstrainedPredicate)
             out.write('\n')
-            if self.cfarNode.traceConstraints:
+            if self.conditionTrace.traceConstraints:
                 out.write('\nUser-supplied trace constraints:\n')
-                for tc in self.cfarNode.traceConstraints:
+                for tc in self.conditionTrace.traceConstraints:
                     out.write(f'{tc[0].pretty} {tc[1]} {tc[2]}\n')
                 if self.conditionTrace.trace_true or self.conditionTrace.trace_false:
-                    out.write('\nEffective equivalence condition after adding user-provided constraints::\n')
+                    out.write('\nEffective equivalence condition after adding user-provided constraints:\n')
                     pate.pprint_symbolic(out, self.conditionTrace.predicate)
+                else:
+                    out.write('\nEquivalence condition unsatisfiable with user-supplied constraints.\n')
             else:
                 out.write('\nNo user-supplied trace constraints.\n')
             self.eqCondField.appendPlainText(out.getvalue())
@@ -650,7 +652,6 @@ class PateTraceConstraintDialog(QDialog):
         buttonBox.rejected.connect(self.reject)
         self.okButton = buttonBox.button(QDialogButtonBox.Ok)
         self.cancelButton = buttonBox.button(QDialogButtonBox.Cancel)
-        self.okButton.setEnabled(False)  # Enabled when at least one constraint
 
         # Main Layout
         main_layout = QVBoxLayout()
@@ -660,6 +661,8 @@ class PateTraceConstraintDialog(QDialog):
         main_layout.addWidget(buttonBox)
         self.setLayout(main_layout)
 
+        self.initConstraints()
+
         if len(self.traceVars) == 0:
             # No vars to constrain, disable everything except cancel button
             QListWidgetItem('No variables available to constrain.', self.constraintList)
@@ -667,7 +670,6 @@ class PateTraceConstraintDialog(QDialog):
             self.intTextLine.setEnabled(False)
             removeButton.setEnabled(False)
             addButton.setEnabled(False)
-            self.okButton.setEnabled(False)
             self.constraintList.setEnabled(False)
 
     def addConstraint(self):
@@ -688,11 +690,7 @@ class PateTraceConstraintDialog(QDialog):
         # TODO: Prevent duplicates (wont hurt anything, but not useful to do and may mask entry error)
         # TODO: Need data for constraint, associate with QListWidgetItem or subclass? Wait for var rep?
 
-        constraint = f'{traceVar.pretty} {rel} {intVal}'
-        item = QListWidgetItem(constraint, self.constraintList)
-        item.setData(Qt.UserRole, (traceVar, rel, intVal))
-
-        self.okButton.setEnabled(self.constraintList.count() > 0)
+        self.addConstraintListItem(traceVar, rel, intVal)
 
     def removeSelectedConstraints(self):
         clist = self.constraintList
@@ -702,12 +700,19 @@ class PateTraceConstraintDialog(QDialog):
             itemRow = clist.row(item)
             clist.takeItem(itemRow)
 
-        self.okButton.setEnabled(self.constraintList.count() > 0)
-
-
     def getConstraints(self) -> list[tuple[pate.TraceVar, str, str]]:
         lw = self.constraintList
         return [lw.item(x).data(Qt.UserRole) for x in range(lw.count())]
+
+    def initConstraints(self):
+        if self.cfarNode.equivalenceConditionTrace.traceConstraints:
+            for (traceVar, rel, intVal) in self.cfarNode.equivalenceConditionTrace.traceConstraints:
+                self.addConstraintListItem(traceVar, rel, intVal)
+
+    def addConstraintListItem(self, traceVar: pate.TraceVar, rel: str, intVal: str):
+        constraint = f'{traceVar.pretty} {rel} {intVal}'
+        item = QListWidgetItem(constraint, self.constraintList)
+        item.setData(Qt.UserRole, (traceVar, rel, intVal))
 
 
 class InstTreeDiffWidget(QWidget):
