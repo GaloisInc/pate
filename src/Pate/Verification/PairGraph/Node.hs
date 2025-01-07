@@ -50,7 +50,6 @@ module Pate.Verification.PairGraph.Node (
   , isSingleNode
   , isSingleNodeEntry
   , isSingleReturn
-  , splitGraphNode
   , getDivergePoint
   , getDivergePoint'
   , eqUptoDivergePoint
@@ -226,20 +225,18 @@ pattern GraphNodeReturn blks <- (ReturnNode (NodeContent _ blks))
 
 data DivergePoint arch (tp :: Qu.QuantK PB.WhichBinary) where
   DivergePointSingle :: PB.WhichBinaryRepr bin -> GraphNode' arch Qu.AllK -> DivergePoint arch (Qu.OneK bin)
-  DivergePointTwoSided ::  GraphNode' arch Qu.AllK -> DivergePoint arch Qu.AllK
   NoDivergePointCtor :: DivergePoint arch Qu.AllK
   SomeDivergePoint :: Maybe (GraphNode' arch Qu.AllK) -> DivergePoint arch Qu.ExistsK
 
 divergePointExists :: DivergePoint arch tp -> DivergePoint arch Qu.ExistsK
 divergePointExists = \case
   DivergePointSingle _ nd -> SomeDivergePoint (Just nd)
-  DivergePointTwoSided nd -> SomeDivergePoint (Just nd)
   NoDivergePointCtor -> SomeDivergePoint Nothing
   x@SomeDivergePoint{} -> x
 
 instance Qu.QuantConvertible (DivergePoint arch) where
   applyQuantConversion qc dp = case (qc, dp) of
-    (Qu.ConvertExistsToAll, SomeDivergePoint (Just nd)) -> Just $ (DivergePointTwoSided nd)
+    (Qu.ConvertExistsToAll, SomeDivergePoint (Just _)) -> Nothing -- invalid case
     (Qu.ConvertExistsToAll, SomeDivergePoint Nothing) -> Just $ NoDivergePointCtor
     (Qu.ConvertExistsToOne repr, SomeDivergePoint (Just nd)) -> Just $ (DivergePointSingle repr nd)
     (Qu.ConvertExistsToOne{}, SomeDivergePoint Nothing) -> Nothing
@@ -250,22 +247,21 @@ instance Qu.QuantConvertible (DivergePoint arch) where
 deriving instance Eq (DivergePoint arch tp)
 deriving instance Ord (DivergePoint arch tp)
 
+
 data DivergePointProof arch tp where
-  DivergePointProof :: (KnownRepr Qu.QuantRepr tp, Qu.IsExistsOr tp tp) => GraphNode' arch Qu.AllK -> DivergePointProof arch tp
+  DivergePointProof :: (KnownRepr Qu.QuantRepr tp, Qu.IsExistsOr tp tp, Qu.NotAllK tp) => GraphNode' arch Qu.AllK -> DivergePointProof arch tp
 
 divergePointProof :: DivergePoint arch tp -> Maybe (DivergePointProof arch tp)
 divergePointProof = \case
   DivergePointSingle repr nd -> withRepr repr $ Just $ DivergePointProof nd
-  DivergePointTwoSided nd -> Just $ DivergePointProof nd
   NoDivergePointCtor -> Nothing
   SomeDivergePoint (Just nd) -> Just $ DivergePointProof nd
   SomeDivergePoint Nothing -> Nothing
 
-pattern DivergePoint :: forall arch tp. () => (KnownRepr Qu.QuantRepr tp, Qu.IsExistsOr tp tp) => GraphNode' arch Qu.AllK -> DivergePoint arch tp
+pattern DivergePoint :: forall arch tp. () => (KnownRepr Qu.QuantRepr tp, Qu.IsExistsOr tp tp, Qu.NotAllK tp) => GraphNode' arch Qu.AllK -> DivergePoint arch tp
 pattern DivergePoint nd <- (divergePointProof -> Just (DivergePointProof nd)) where
   DivergePoint nd = case knownRepr :: Qu.QuantRepr tp of
     Qu.QuantOneRepr repr -> DivergePointSingle repr nd
-    Qu.QuantAllRepr -> DivergePointTwoSided nd
     Qu.QuantSomeRepr -> SomeDivergePoint (Just (Qu.coerceQuant nd))
 
 data NoDivergePointProof arch tp where
@@ -382,7 +378,7 @@ mkMergedNodeEntry ::
   PB.ConcreteBlock arch PB.Original ->
   PB.ConcreteBlock arch PB.Patched -> 
   NodeEntry' arch Qu.AllK
-mkMergedNodeEntry nd blkO blkP = NodeEntry (CallingContext cctx (DivergePoint nd)) (Qu.All $ \case PB.OriginalRepr -> blkO; PB.PatchedRepr -> blkP)
+mkMergedNodeEntry nd blkO blkP = NodeEntry (CallingContext cctx NoDivergePoint) (Qu.All $ \case PB.OriginalRepr -> blkO; PB.PatchedRepr -> blkP)
   where
     CallingContext cctx _ = nodeContext nd
 
@@ -391,7 +387,7 @@ mkMergedNodeReturn ::
   PB.FunctionEntry arch PB.Original ->
   PB.FunctionEntry arch PB.Patched -> 
   NodeReturn' arch Qu.AllK
-mkMergedNodeReturn nd fnO fnP = NodeReturn (CallingContext cctx (DivergePoint nd)) (Qu.All $ \case PB.OriginalRepr -> fnO; PB.PatchedRepr -> fnP)
+mkMergedNodeReturn nd fnO fnP = NodeReturn (CallingContext cctx NoDivergePoint) (Qu.All $ \case PB.OriginalRepr -> fnO; PB.PatchedRepr -> fnP)
   where
     CallingContext cctx _ = nodeContext nd
 
@@ -450,14 +446,6 @@ eqUptoDivergePoint (ReturnNode (NodeReturn ctx1 blks1)) (ReturnNode (NodeReturn 
   = True
 eqUptoDivergePoint _ _ = False
 
--- | Split a graph node into two single-sided nodes (original, patched)
---   The input node is marked as the diverge point in the two resulting nodes.
-splitGraphNode :: PPa.PatchPairM m => GraphNode arch -> m (GraphNode arch, GraphNode arch)
-splitGraphNode nd = do
-  nodes <- PPa.forBinsC $ \bin -> toSingleGraphNode bin nd
-  nodeO <- PPa.getC PB.OriginalRepr nodes
-  nodeP <- PPa.getC PB.PatchedRepr nodes
-  return (nodeO, nodeP)
 
 toTwoSidedNode :: PPa.PatchPairM m => GraphNode' arch qbin -> m (GraphNode' arch Qu.AllK)
 toTwoSidedNode nd = withKnownBin nd $ case Qu.convertQuant nd of
@@ -643,9 +631,7 @@ combineSingleEntries node1 node2 = do
   let ndPair = PPa.mkPair (singleEntryBin node1) (Qu.AsSingle node1) (Qu.AsSingle node2)
   Qu.AsSingle nodeO <- PPa.get PB.OriginalRepr ndPair
   Qu.AsSingle nodeP <- PPa.get PB.PatchedRepr ndPair
-  -- it only makes sense to combine nodes that share a divergence point,
-  -- where that divergence point will be used as the calling context for the
-  -- merged point
+  -- it only makes sense to combine nodes that share a divergence point
   let divergeO = singleNodeDivergence nodeO
   let divergeP = singleNodeDivergence nodeP
   guard $ divergeO == divergeP
