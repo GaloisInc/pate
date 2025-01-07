@@ -621,9 +621,9 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
           pr <- currentPriority
           atPriority (raisePriority pr) (Just "Starting Split Analysis") $ do
             pg2 <- propagateOne scope bundle nd nd_single ConditionAsserted pg >>= \case
-              Just pg1 -> rewrite_assert binds pg1
-              Nothing -> return pg
-            
+              (ConditionNotPropagated, pg1) -> return pg1
+              (_, pg1) -> rewrite_assert binds pg1
+
             withAssumptionSet (PAS.fromExprBindings binds) $ withGraphNode' scope nd bundle dom pg2 $ do
               widenAlongEdge scope bundle nd dom_single pg2 nd_single
 
@@ -775,7 +775,6 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
 
   let syncNode = GraphNode syncNodeEntry
   let snePair = Qu.QuantEach (\case PBi.OriginalRepr -> sneO; PBi.PatchedRepr -> sneP)
-  let pre_refines = getDomainRefinements syncNode pg
 
   -- we start with two scopes: one representing the program state at the point of divergence: 'init_scope',
   -- and one representing the program state at the merge point
@@ -817,24 +816,21 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
               liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) nd syncNode ConditionAsserted pg_ >>= \case
-                Just pg_' -> do
+                (ConditionNotPropagated, pg_') -> 
+                  -- bindings already assumed above
+                  return (W4.truePred sym, pg_)
+                (_, pg_') -> do
                   let binds_other = foldr (collectCondition bin nd pg_') (singleBundleBinds sbundle) [minBound .. maxBound]
                   priority <- thisPriority
                   (binds, pg_'') <- IO.liftIO $ addFnBindings sym mergeScope (GraphNode sne_other) binds_other pg_'
                   binds_asm <- IO.liftIO $ PFn.toPred sym binds
                   return $ (binds_asm, queueAncestors (priority PriorityHandleDesync) nd pg_'')
-                Nothing -> 
-                  -- bindings already assumed above
-                  return (W4.truePred sym, pg_)
             
             new_bind_asm <- PPa.joinPatchPred (\x y -> IO.liftIO $ W4.andPred sym x y) $ \bin -> 
               PPa.getC bin new_bind_asms
 
             withAssumption new_bind_asm $
               withPG_ pg'' $ PPa.catBins $ \bin -> do
-                liftPG $ modify $ \pg_ -> case getDomainRefinements syncNode pg_ of
-                  [] -> addDomainRefinements syncNode pre_refines pg_
-                  _ -> pg_
                 liftEqM_ $ \pg_ -> do
                   sbundle <- PPa.get bin sbundlePair
                   let sne = Qu.quantEach snePair bin
@@ -3063,7 +3059,7 @@ handleDivergingPaths scope bundle currBlock st dom blkt = fnTrace "handleDivergi
           -- doesn't need synchronization
           Just pg1 <- return $ addToWorkList True someDivergeNode (priority PriorityDeferred) pg
           return $ st'{ branchGraph = pg1 }
-        AlignControlFlow condK -> withSym $ \sym -> do
+        AlignControlFlow condK -> fnTrace "AlignControlFlow" $ withSym $ \sym -> do
           traces <- bundleToInstrTraces bundle
           pg2 <- case traces of
             PPa.PatchPairC traceO traceP -> do
