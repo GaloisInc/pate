@@ -148,13 +148,13 @@ makeFreshAbstractDomain ::
   GraphNode arch {- ^ source node -} ->
   GraphNode arch {- ^ target graph node -} ->
   EquivM sym arch (PAD.AbstractDomain sym arch v)
-makeFreshAbstractDomain scope bundle preDom from _to = withTracing @"debug" "makeFreshAbstractDomain" $ do
+makeFreshAbstractDomain scope bundle preDom from to = withTracing @"debug" "makeFreshAbstractDomain" $ do
   case from of
     -- graph node
     GraphNodeEntry{} -> startTimer $ do
       initDom <- initialDomain
-      vals <- getInitalAbsDomainVals bundle preDom
-      evSeq <- getEventSequence scope bundle preDom
+      vals <- getInitalAbsDomainVals to bundle preDom
+      evSeq <- getEventSequence to scope bundle preDom
       return $ initDom { PAD.absDomVals = vals, PAD.absDomEvents = evSeq }
     -- return node
     GraphNodeReturn{} -> do
@@ -162,7 +162,7 @@ makeFreshAbstractDomain scope bundle preDom from _to = withTracing @"debug" "mak
       -- as a small optimization, we know that the return nodes leave the values
       -- unmodified, and therefore any previously-established value constraints
       -- will still hold
-      evSeq <- getEventSequence scope bundle preDom
+      evSeq <- getEventSequence to scope bundle preDom
       return $ initDom { PAD.absDomVals = PAD.absDomVals preDom
                        , PAD.absDomEvents = evSeq
                        }
@@ -1438,12 +1438,13 @@ abstractOverVars scope_pre bundle _from _to postSpec postResult = do
 --   Returns empty sequences for two-sided analysis, since those are checked
 --   for equality at each verification step.
 getEventSequence ::
+  GraphNode arch ->
   PS.SimScope sym arch v  ->
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v ->
   EquivM sym arch (PPa.PatchPair (PAD.EventSequence sym arch))
-getEventSequence _scope bundle preDom = withTracing @"function_name" "getEventSequence" $ withSym $ \sym -> do
-  case PS.simOut bundle of
+getEventSequence to _scope bundle preDom = withTracing @"function_name" "getEventSequence" $ withSym $ \sym -> do
+  evs <- case PS.simOut bundle of
     PPa.PatchPair{} -> PPa.PatchPair <$> PAD.emptyEvents sym <*> PAD.emptyEvents sym
     PPa.PatchPairSingle bin out -> do
       PAD.EventSequence prev_seq <- PPa.get bin (PAD.absDomEvents preDom)
@@ -1457,6 +1458,7 @@ getEventSequence _scope bundle preDom = withTracing @"function_name" "getEventSe
           -- otherwise, append new events onto the previous ones
           fin_seq <- liftIO $ appendSymSequence sym next_seq prev_seq
           return $ PPa.PatchPairSingle bin (PAD.EventSequence fin_seq)
+  PPa.matchShape (graphNodeBlocks to) evs $ \_ -> PAD.emptyEvents sym
 
 -- | Extract the sequence of observable events for the given 
 --   symbolic execution step
@@ -1773,20 +1775,22 @@ widenPostcondition scope bundle preD postD0 = do
 -- Uses the default concretization strategies from 'Pate.Verification.Concretize'
 getInitalAbsDomainVals ::
   forall sym arch v.
+  GraphNode arch ->
   SimBundle sym arch v ->
   PAD.AbstractDomain sym arch v {- ^ incoming pre-domain -} ->
   EquivM sym arch (PPa.PatchPair (PAD.AbstractDomainVals sym arch))
-getInitalAbsDomainVals bundle preDom = withTracing @"debug" "getInitalAbsDomainVals" $ withSym $ \sym -> do
+getInitalAbsDomainVals to bundle preDom = withTracing @"debug" "getInitalAbsDomainVals" $ withSym $ \sym -> do
 
   getConcreteRange <- PAD.mkGetAbsRange (\es -> TFC.fmapFC (PAD.extractAbsRange sym) <$> concretizeWithSolverBatch es)
   
   eqCtx <- equivalenceContext
-  forkBins $ \bin -> do
+  vals <- forkBins $ \bin -> do
     out <- PPa.get bin (PS.simOut bundle)
     pre <- PPa.get bin (PAD.absDomVals preDom)
 
     PAD.batchGetAbsRange getConcreteRange $ \getConcreteRangeBatch -> 
       PAD.initAbsDomainVals sym eqCtx getConcreteRangeBatch out pre
+  PPa.matchShape (graphNodeBlocks to) vals $ \_ -> return PAD.emptyDomainVals
 
 
 widenUsingCounterexample ::

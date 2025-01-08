@@ -77,6 +77,7 @@ module Pate.PatchPair (
   , toSingleton
   , zip
   , WithBin(..)
+  , matchShape
   ) where
 
 import           Prelude hiding (zip, map, traverse)
@@ -356,11 +357,34 @@ asSingleton _ = throwPairErr
 -- | Convert a 'PatchPair' into a singleton containing only
 --   a value for the given binary 'bin'.
 toSingleton ::
+  HasCallStack =>
   PatchPairM m =>
   PB.WhichBinaryRepr bin -> 
   PatchPair tp ->
   m (PatchPair tp)
 toSingleton bin pPair = PatchPairSingle bin <$> get bin pPair
+
+-- | Produce a 'PatchPair' with the same shape as a given pair by filling missing fields
+--   with a given default value, or dropping values, as needed.
+matchShape ::
+  Monad m =>
+  PatchPair tp1 ->
+  PatchPair tp2 ->
+  (forall bin. PB.WhichBinaryRepr bin -> m (tp2 bin)) ->
+  m (PatchPair tp2)
+matchShape p1 p2 f = case (p1, p2) of
+  (PatchPair{}, PatchPair{}) -> return p2
+  (PatchPairSingle bin1 _, PatchPairSingle bin2 x2) -> case PB.binCases bin1 bin2 of
+    Left Refl -> return p2
+    Right Refl -> do
+      x1 <- f bin1
+      return $ mkPair bin1 x1 x2
+  (PatchPair{}, PatchPairSingle bin2 x2) -> do
+    x1 <- f (PB.flipRepr bin2)
+    return $ mkPair bin2 x2 x1
+  (PatchPairSingle bin1 _, PatchPair x1 x2) -> case bin1 of
+    PB.OriginalRepr -> return $ PatchPairSingle PB.OriginalRepr x1
+    PB.PatchedRepr -> return $ PatchPairSingle PB.PatchedRepr x2
 
 -- | Create a 'PatchPair' with a shape according to 'getPairRepr'.
 --   The provided function execution for both the original and patched binaries
