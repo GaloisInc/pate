@@ -588,6 +588,8 @@ initSingleSidedDomain ::
 initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ withSym $ \sym -> withPG_ pg0 $ do
   let dp = singleNodeDivergePoint (GraphNode sne)
   let nd = Qu.coerceToExists dp
+  pr <- lift $ currentPriority
+
   nd' <- case Qu.convertQuant nd of
     Just (nd' :: GraphNode' arch Qu.AllK) -> return nd'
     Nothing -> fail $ "Unexpected single-sided diverge point: " ++ show nd
@@ -614,12 +616,15 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
             cond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
             cond' <- PSi.applySimpStrategy (PSi.rewriteStrategy exprBinds) cond
             let condSpec' = PS.mkSimSpec scope cond'
-            return $ setCondition nd ConditionAsserted PropagateFull condSpec' pg
+            let pg' = setCondition nd ConditionAsserted PropagateFull condSpec' pg
+            -- we need to schedule the ancestors here to ensure that the resulting
+            -- assertion is propagated (if needed), since 'propagateOne' doesn't do this step
+            return $ queueAncestors (lowerPriority pr) nd pg'
+
           Nothing -> return pg
 
     let do_widen binds pg = fnTrace "do_widen" $ do
-          pr <- currentPriority
-          atPriority (raisePriority pr) (Just "Starting Split Analysis") $ do
+          atPriority (raisePriority pr) (Just "Starting Split Analysis") $  do
             pg2 <- propagateOne scope bundle nd nd_single ConditionAsserted pg >>= \case
               (ConditionNotPropagated, pg1) -> return pg1
               (_, pg1) -> rewrite_assert binds pg1
@@ -636,7 +641,7 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
         liftEqM_ $ \pg -> do_widen binds pg
       (Just{}, Nothing) -> do
         emitTrace @"debug" "Case: Bindings on only this side"
-        pr <- lift $ currentPriority
+        
         -- Should we lower the priority here? Is it possible to get caught in a loop otherwise?
         -- Formally we should be able to find all relevant nodes based on which bindings
         -- we're missing
