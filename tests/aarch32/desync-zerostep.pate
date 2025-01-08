@@ -10,12 +10,12 @@ Function Entry "f"
 
         ...
         Choose a desynchronization point:
-            > 0x1015c (original)
-            > 0x1015c (patched)
+            > 0x10154 (original)
+            > 0x10154 (patched)
 
 
 
-0x1015c [ via: "f"
+0x10154 [ via: "f"
     ...
     Call to: "puts" (0x10110) Returns to: "f"
         ...
@@ -24,7 +24,7 @@ Function Entry "f"
 
         ...
         Choose a synchronization point:
-            > 0x1015c (original)
+            > 0x10154 (original)
             > 0x1016c (patched)
             > Finish Choosing
 
