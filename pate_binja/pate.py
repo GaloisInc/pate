@@ -21,9 +21,26 @@ from typing import IO, Any, Optional
 pp = pprint.PrettyPrinter(indent=4)
 
 
+class VerifierAction(abc.ABC):
+    @abc.abstractmethod
+    def execute(self, pw: PateWrapper):
+        pass
+
+
+class VerifierTtyCmd(VerifierAction):
+    def __init__(self, ttyCmd: str):
+        self.ttyCmd = ttyCmd.strip()
+
+    def execute(self, pw: PateWrapper) -> None:
+        if pw.trace_file:
+            pw.trace_file.write('User choice: ' + self.ttyCmd + '\n')
+            pw.trace_file.flush()
+        pw.command(self.ttyCmd)
+
+
 class PateUserInteraction(abc.ABC):
     @abc.abstractmethod
-    def ask_user(self, prompt: str, choices: list[str], replay_choice: Optional[str] = None) -> Optional[str]:
+    def ask_user(self, prompt: str, choices: list[str], replay_choice: Optional[str] = None) -> VerifierAction:
         pass
 
     @abc.abstractmethod
@@ -167,7 +184,7 @@ class PateWrapper:
                 # Output line and continue looking for a JSON record
                 self.user.show_message(line.rstrip('\n'))
                 if gotoPromptAfterNonJson:
-                    self._command('goto_prompt')
+                    self.command('goto_prompt')
                     # Skip lines till we get json
                     gotoPromptAfterNonJson = False
             else:
@@ -181,7 +198,7 @@ class PateWrapper:
             if line == s:
                 break
 
-    def _command(self, cmd: str) -> None:
+    def command(self, cmd: str) -> None:
         if self.debug_io:
             print('Command to Pate: ', cmd)
         if self.pate_proc.stdin:
@@ -191,14 +208,14 @@ class PateWrapper:
             self.trace_file.write('Command: ' + cmd + '\n')
             self.trace_file.flush()
         else:
-            # Replay mode
-            cmd = self.pate_proc.stdout.readline()
-            # TODO: Check that cmd is same as arg?
+            # Replay mode, consume 'Command' line.
+            cmd = self.pate_proc.stdout.readline()  # Don't do anything with command read for now.
+            # TODO: Check that command read from file is same as requested? If not, warn that replay is out of sync?
 
     def extract_graph(self) -> CFARGraph:
         cfar_graph = CFARGraph()
 
-        self._command('top')
+        self.command('top')
         top = self.next_json()
 
         self.extract_graph_rec(top, [], None, cfar_graph, None, None, None)
@@ -213,7 +230,7 @@ class PateWrapper:
         return cfar_graph
 
     def markFocusNodes(self, cfar_graph: CFARGraph) -> None:
-        self._command('goto_prompt')
+        self.command('goto_prompt')
         rec = self.next_json()
 
         while True:
@@ -235,7 +252,7 @@ class PateWrapper:
                     node.focus = True
                 break
 
-            self._command('up')
+            self.command('up')
             rec = self.next_json()
         pass
 
@@ -359,7 +376,7 @@ class PateWrapper:
             for i,tnc in enumerate(rec['trace_node_contents']):
                 content = tnc['content']
                 if content.get('node_kind') == 'message' and tnc.get('pretty') == 'Simplified Predicate':
-                    self._command(str(i))
+                    self.command(str(i))
                     childrec = self.next_json()
                     for ci, ctnc in enumerate(childrec['trace_node_contents']):
                         ccontent = ctnc['content']
@@ -379,7 +396,7 @@ class PateWrapper:
                                     else:
                                         cfar_parent.assumedConditionTrace = ConditionTrace(ccontent)
 
-                    self._command('up')
+                    self.command('up')
                     # Consume result of up, but do not need it
                     ignore = self.next_json()
             # Don't go any deeper
@@ -491,12 +508,12 @@ class PateWrapper:
                     # Look for counter-example trace
                     or (len(path) == 3 and rec.get('trace_node_kind') == 'blocktarget'
                         and child.get('trace_node_kind') == 'node')):
-                self._command(str(i))
+                self.command(str(i))
                 childrec = self.next_json()
                 # update with values from child. TODO: ask Dan about this?
                 childrec.update(child)
                 self.extract_graph_rec(childrec, path + [i], context, cfar_graph, cfar_parent, cfar_exit, tnc)
-                self._command('up')
+                self.command('up')
                 # Consume result of up, but do not need it
                 ignore = self.next_json()
             # else:
@@ -504,33 +521,26 @@ class PateWrapper:
             #         print('CFAR skip child:')
             #         pp.pprint(child)
 
-    def _ask_user_rec(self, prompt_rec: dict) -> str:
+    def _ask_user_rec(self, prompt_rec: dict) -> VerifierAction:
         # Read entry point choices
         prompt = prompt_rec['this']
         choices = list(map(get_choice_id, prompt_rec.get('trace_node_contents', [])))
-        return self._ask_user(prompt, choices).strip()
-        # Write line to trace file for replay
 
-    def _ask_user(self, prompt: str, choices: list[str]) -> Optional[str]:
         replay_choice = None
         if self.trace_file is None:
             replay_line = self.pate_proc.stdout.readline()
             if replay_line.startswith('User choice: '):
                 replay_choice = replay_line[len('User choice: '):].strip()
 
-        choice = self.user.ask_user(prompt, choices, replay_choice).strip()
-
-        if self.trace_file:
-            self.trace_file.write('User choice: ' + choice + '\n')
-            self.trace_file.flush()
-        return choice
+        action = self.user.ask_user(prompt, choices, replay_choice)
+        return action
 
     def command_loop(self):
         try:
             if self.config_callback:
                 self.config_callback(self.config)
             rec = self.next_json()
-            self._command('goto_prompt')
+            self.command('goto_prompt')
             while self.command_step():
                 pass
             # Enter trace constraint processing mode
@@ -568,14 +578,14 @@ class PateWrapper:
                     self.last_cfar_graph = cfar_graph
                     self.user.show_cfar_graph(cfar_graph)
                 # Go back to prompt
-                self._command('goto_prompt')
+                self.command('goto_prompt')
                 rec = self.next_json()
-            choice = self._ask_user_rec(rec)
-            self._command(choice)
+            action = self._ask_user_rec(rec)
+            action.execute(self)
 
         elif isinstance(rec, dict) and rec.get('error'):
             self.show_message('error: ' + rec['error'])
-            self._command('goto_prompt')
+            self.command('goto_prompt')
 
         else:
             # Message(s)
@@ -585,7 +595,7 @@ class PateWrapper:
 
     def processFinalResult(self, traceConstraints: Optional[list[tuple[TraceVar, str, str]]] = None, cfarNode: CFARNode = None):
         # TODO: add option to do with respect to a cfar node in which case missing should clear eq cond data?
-        self._command('up')
+        self.command('up')
         rec = self.next_json()
         # isinstance(rec, dict) and rec.get('trace_node_kind') == 'final_result':
         # Find the last "Toplevel Result"
@@ -637,7 +647,7 @@ class PateWrapper:
             self.user.show_message(out.getvalue())
         if self.last_cfar_graph:
             self.user.show_cfar_graph(self.last_cfar_graph)
-        self._command('goto_prompt')
+        self.command('goto_prompt')
         rec = self.next_json()
 
     def getReplayTraceConstraints(self) -> Optional[list[tuple[TraceVar, str, str]]]:
@@ -694,7 +704,7 @@ class PateWrapper:
 
         #print('verifierTraceConstraintInput:', verifierTraceConstraintInput)
         #self.debug_io = True
-        self._command('0')
+        self.command('0')
         # TODO: Consider generalizing command_loop rather than this processing?
         #print('waiting for constraint prompt')
         while True:
@@ -703,7 +713,7 @@ class PateWrapper:
                 break
             else:
                 self.show_message(rec)
-        self._command(verifierTraceConstraintInput)
+        self.command(verifierTraceConstraintInput)
         #print('waiting for regenerate result prompt')
         while True:
             rec = self.next_json()
@@ -1887,7 +1897,7 @@ class TtyUserInteraction(PateUserInteraction):
     def __init__(self, ask_show_cfar_graph: bool = False):
         self.ask_show_cfar_graph = ask_show_cfar_graph
 
-    def ask_user(self, prompt: str, choices: list[str], replay_choice: Optional[str] = None) -> str:
+    def ask_user(self, prompt: str, choices: list[str], replay_choice: Optional[str] = None) -> VerifierAction:
         print()
         print(prompt)
         for i, e in enumerate(choices):
@@ -1900,7 +1910,7 @@ class TtyUserInteraction(PateUserInteraction):
         else:
             choice = input("Pate command: ")
 
-        return choice
+        return VerifierTtyCmd(choice)
 
     def show_message(self, msg: str) -> None:
         print(msg)

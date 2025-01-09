@@ -226,11 +226,11 @@ class GuiUserInteraction(pate.PateUserInteraction):
             choice = self.pate_widget.user_response
             self.pate_widget.user_response = None
         if replay_choice:
+            choice = replay_choice
             execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'PATE Command: {replay_choice} (replay)\n'))
-            return replay_choice
         else:
             execute_on_main_thread_and_wait( lambda: self.pate_widget.output_field.appendPlainText(f'PATE Command: {choice}\n'))
-            return choice
+        return pate.VerifierTtyCmd(choice)
 
     def show_message(self, msg: str) -> None:
         execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(msg))
@@ -1265,6 +1265,10 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
             menu = QMenu(self)
 
+            action = QAction('Goto node in Pate', self)
+            action.triggered.connect(lambda _: self.gotoNodeInPate(cfarNode))
+            menu.addAction(action)
+
             if cfarNode.original_addr:
                 action = QAction(f'Goto original address {hex(cfarNode.original_addr)}', self)
                 action.triggered.connect(lambda _: self.pate_widget.gotoOriginalAddress(cfarNode.original_addr))
@@ -1308,6 +1312,10 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
             if menu.actions():
                 menu.exec_(event.globalPos())
+
+    def gotoNodeInPate(self, cfarNode: pate.CFARNode):
+        print('gotoNodeInPate called. ID:  ', cfarNode.id)
+        print('gotoNodeInPate called. this:', cfarNode.data.get('this'))
 
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
         d = PateCfarEqCondDialog(cfarNode,
