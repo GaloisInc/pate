@@ -586,7 +586,7 @@ asSingleNode nd = case graphNodeBlocks nd of
   Qu.All{} -> PPa.throwPairErr
   Qu.Single (repr :: PB.WhichBinaryRepr bin) _ -> withRepr repr $ case Qu.convertQuant nd of
     Just (nd' :: GraphNode' arch (Qu.OneK bin)) -> return $ Some (Qu.AsSingle nd')
-    Nothing -> PPa.throwPairErr
+    Nothing -> error "asSingleNode: unexpected failed conversion"
   
 singleNodeBlock :: SingleNodeEntry arch bin -> PB.ConcreteBlock arch bin
 singleNodeBlock (SingleNodeEntry _ blk) = blk
