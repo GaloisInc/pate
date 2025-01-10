@@ -862,7 +862,7 @@ withWorkItem gr0 f = do
       let nd = workItemNode wi
       res <- subTraceLabel @"node" (printPriorityKind priority) nd $ atPriority priority Nothing $ do
         (mnext, gr2) <- case wi of
-          ProcessNode True (GraphNode ne) | Just (Some (Qu.AsSingle sne)) <- asSingleNodeEntry ne -> do
+          ProcessNode _ (GraphNode ne) | Just (Some (Qu.AsSingle sne)) <- asSingleNodeEntry ne -> do
             (evalPG gr1 $ isSyncNode sne) >>= \case
               True -> do
                 gr2 <- execPG gr1 $ queueExitMerges (\pk -> mkPriority pk priority) (SyncAtStart sne)
@@ -878,7 +878,7 @@ withWorkItem gr0 f = do
                 return (Nothing, gr2)
               False -> processNode nd' gr1
           ProcessNode False nd' -> do
-            emitTrace @"debug" $ "ProcessNode: (no merge)" ++ show nd'
+            emitTrace @"debug" $ "ProcessNode: (no merge) " ++ show nd'
             processNode nd' gr1
           ProcessSplit sne -> do
             emitTrace @"debug" $ "ProcessSplit: " ++ show sne
