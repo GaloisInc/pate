@@ -557,21 +557,22 @@ cutAfterAddress addr blk = do
       False -> go (addr_next:addrs)
 
 addImmediateEqDomRefinementChoice ::
+  PS.SimScope sym arch v ->
   GraphNode arch ->
   PAD.AbstractDomain sym arch v ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-addImmediateEqDomRefinementChoice nd preD gr0 = do
+addImmediateEqDomRefinementChoice scope nd preD gr0 = do
   let gr1 = gr0
   choose @"()" ("Refine equivalence domain for sync point?") $ \choice -> do
     let go condK = do
           let msg = conditionAction condK
           choice (msg ++ " condition") () $ do
             locFilter <- refineEquivalenceDomain preD
-            return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality locFilter) gr1
+            return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality (PS.mkSimSpec scope locFilter)) gr1
           choice (msg ++ " condition (using intra-block path conditions)") () $ do
             locFilter <- refineEquivalenceDomain preD
-            return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths locFilter) gr1
+            return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths (PS.mkSimSpec scope locFilter)) gr1
           choice (msg ++ " that branch is infeasible") () $
             return $ addDomainRefinement nd (PruneBranch condK) gr1
     choice ("No refinements") () $ return gr1

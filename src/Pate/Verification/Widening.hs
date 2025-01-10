@@ -231,15 +231,20 @@ strengthenPredicate values_ eqPred = withSym $ \sym -> do
             emitWarning $ PEE.UnsatisfiableEquivalenceCondition (PEE.SomeExpr @_ @sym cond3)
             return $ W4.truePred sym
 
+-- | TODO: formally this should actually be a predicate, but we'll stick with
+--   structural equivalence for now
+isRefinedLoc :: RefineLocations sym arch v -> PL.Location sym arch nm k -> Bool
+isRefinedLoc (RefineLocations locs) l = Set.member (PL.SomeLocation l) locs
+
 computeEquivCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   AbstractDomain sym arch v {- ^ incoming predomain -} ->
   AbstractDomain sym arch v {- ^ resulting target postdomain -} ->
-  (forall nm k. PL.Location sym arch nm k -> Bool) {- ^ filter for locations to force equal -} ->
+  RefineLocations sym arch v {- ^ filter for locations to force equal -} ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
-computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeEquivCondition" $ withSym $ \sym -> do
+computeEquivCondition scope bundle preD postD refine = withTracing @"debug" "computeEquivCondition" $ withSym $ \sym -> do
   eqCtx <- equivalenceContext
   emitTraceLabel @"domain" PAD.Postdomain (Some postD)
   let 
@@ -248,7 +253,7 @@ computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeE
     regsP = PS.simRegs stP
     memO = PS.simMem stO
     memP = PS.simMem stP
-  postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case f loc of
+  postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case isRefinedLoc refine loc of
     False -> return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
     True -> case loc of
@@ -259,7 +264,7 @@ computeEquivCondition scope bundle preD postD f = withTracing @"debug" "computeE
   eqCond' <- applyCurrentAsms eqCond
   
   subTree @"loc" "Locations" $
-    PEC.fromLocationTraversable @sym @arch sym eqCond' $ \loc eqPred -> case f loc of
+    PEC.fromLocationTraversable @sym @arch sym eqCond' $ \loc eqPred -> case isRefinedLoc refine loc of
     -- irrelevant location
     False -> return $ W4.truePred sym
     True -> subTrace (PL.SomeLocation loc) $ do
@@ -367,12 +372,12 @@ addEqDomRefinementChoice ::
 addEqDomRefinementChoice condK nd gr0 = do
   addLazyAction refineActions nd gr0 ("Add " ++ conditionName condK) $ \choice -> do
     let msg = conditionAction condK
-    choice (msg ++ " condition") $ \(TupleF2 _ preD) gr1 -> do
+    choice (msg ++ " condition") $ \(TupleF2 scope preD) gr1 -> do
       locFilter <- refineEquivalenceDomain preD
-      return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality locFilter) gr1
-    choice (msg ++ " condition (using intra-block path conditions)") $ \(TupleF2 _ preD) gr1 -> do
+      return $ addDomainRefinement nd (LocationRefinement condK RefineUsingExactEquality (PS.mkSimSpec scope locFilter)) gr1
+    choice (msg ++ " condition (using intra-block path conditions)") $ \(TupleF2 scope preD) gr1 -> do
       locFilter <- refineEquivalenceDomain preD
-      return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths locFilter) gr1
+      return $ addDomainRefinement nd (LocationRefinement condK RefineUsingIntraBlockPaths (PS.mkSimSpec scope locFilter)) gr1
     choice (msg ++ " that branch is infeasible") $ \_ gr1 ->
       return $ addDomainRefinement nd (PruneBranch condK) gr1
 
@@ -647,11 +652,12 @@ applyDomainRefinements scope (from,to) bundle preD postD gr0_ = fnTrace "applyDo
           gr2 <- pruneCurrentBranch scope (from,to) condK gr1
           next gr2
 
-        LocationRefinement condK refineK refine ->  withTracing @"debug" ("Applying LocationRefinement to " ++ show to) $ do
+        LocationRefinement condK refineK refineSpec ->  withTracing @"debug" ("Applying LocationRefinement to " ++ show to) $ do
           -- refine the domain of the predecessor node and drop this domain
+          refine <- IO.liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) refineSpec
           eqCond <- case refineK of
-            RefineUsingIntraBlockPaths -> computeEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
-            RefineUsingExactEquality -> domainToEquivCondition scope bundle preD postD (\l -> refine (PL.SomeLocation l))
+            RefineUsingIntraBlockPaths -> computeEquivCondition scope bundle preD postD refine
+            RefineUsingExactEquality -> domainToEquivCondition scope bundle preD postD refine
           eqCond_pred <- PEC.toPred sym eqCond
           goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
           emitTraceLabel @"expr" "Generated Condition" (Some eqCond_pred)          
@@ -677,10 +683,10 @@ domainToEquivCondition ::
   PS.SimBundle sym arch v ->
   AbstractDomain sym arch v {- ^ pre-domain -} ->
   AbstractDomain sym arch v {- ^ post-domain -} ->
-  (forall nm k. PL.Location sym arch nm k -> Bool) ->
+  RefineLocations sym arch v ->
   EquivM sym arch (PEC.EquivalenceCondition sym arch v)
 domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
-  postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case refine loc of
+  postD_eq' <- PL.traverseLocation @sym @arch sym (PAD.absDomEq postD) $ \loc p -> case isRefinedLoc refine loc of
     False -> return (PL.getLoc loc, p)
     -- modify postdomain to unconditionally include target locations
     True -> case loc of
@@ -690,7 +696,7 @@ domainToEquivCondition scope bundle preD postD refine = withSym $ \sym -> do
   eqCtx <- equivalenceContext
   eqCond <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) postD_eq'
   
-  PEC.fromLocationTraversable @sym @arch sym eqCond $ \loc eqPred -> case refine loc of
+  PEC.fromLocationTraversable @sym @arch sym eqCond $ \loc eqPred -> case isRefinedLoc refine loc of
     False -> return $ W4.truePred sym
     True -> return eqPred
 
@@ -783,7 +789,7 @@ pickMany pickIn = go mempty pickIn
 refineEquivalenceDomain ::
   forall sym arch v.
   AbstractDomain sym arch v ->
-  EquivM sym arch (PL.SomeLocation sym arch -> Bool)
+  EquivM sym arch (RefineLocations sym arch v)
 refineEquivalenceDomain dom = withSym $ \sym -> do
   let regDom = PEE.eqDomainRegisters (PAD.absDomEq dom)
   let allRegs = map fst $ PER.toList (PER.universal sym)
@@ -800,11 +806,13 @@ refineEquivalenceDomain dom = withSym $ \sym -> do
 
   picked <- pickMany pickIn
 
-  return $ \(PL.SomeLocation loc) ->
-    case loc of
-      PL.Register r -> elem (Some r) (pickRegs picked)
-      PL.Cell c -> elem (Some c) (pickStack picked) || elem (Some c) (pickGlobal picked)
-      _ -> False
+  let 
+    regLocs = map (\(Some r) -> PL.SomeLocation (PL.Register r)) (pickRegs picked)
+    stackLocs = map (\(Some c) -> PL.SomeLocation (PL.Cell c)) (pickStack picked)
+    memLocs = map (\(Some c) -> PL.SomeLocation (PL.Cell c)) (pickGlobal picked)
+  
+  return $ RefineLocations (Set.fromList $ regLocs ++ stackLocs ++ memLocs)
+
 
 -- | True if the satisfiability of the predicate only depends on
 --   variables from the given binary

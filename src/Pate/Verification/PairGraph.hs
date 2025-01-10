@@ -103,6 +103,7 @@ module Pate.Verification.PairGraph
   , emptyPairGraph
   , DomainRefinementKind(..)
   , DomainRefinement(..)
+  , RefineLocations(..)
   , addDomainRefinement
   , getNextDomainRefinement
   , conditionPrefix
@@ -158,7 +159,7 @@ import           Data.Kind (Type)
 import qualified Data.Foldable as F
 import           Data.Map (Map)
 import qualified Data.Map as Map
-import           Data.Maybe (fromMaybe, catMaybes)
+import           Data.Maybe (fromMaybe, catMaybes, mapMaybe)
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Map ( MapF )
 import qualified Data.Parameterized.Map as MapF
@@ -196,6 +197,7 @@ import           Pate.Verification.AbstractDomain ( AbstractDomain, AbstractDoma
 import           Pate.TraceTree
 import qualified Pate.Binary as PBi
 import qualified Pate.Verification.FnBindings as PFn
+import qualified Pate.ExprMappable as PEM
 
 import           Control.Applicative (Const(..), Alternative(..)) 
 
@@ -400,8 +402,15 @@ data DomainRefinementKind =
     RefineUsingIntraBlockPaths
   | RefineUsingExactEquality
 
+data RefineLocations sym arch (v :: PS.VarScope) = RefineLocations (Set (PL.SomeLocation sym arch))
+
+instance PEM.ExprMappable sym (RefineLocations sym arch v) where
+  mapExpr sym f (RefineLocations locs) = (RefineLocations . Set.fromList) <$> PEM.mapExpr sym f (Set.toList locs)
+
+instance PS.Scoped (RefineLocations sym arch)
+
 data DomainRefinement sym arch =
-    LocationRefinement ConditionKind DomainRefinementKind (PL.SomeLocation sym arch -> Bool)
+    LocationRefinement ConditionKind DomainRefinementKind (PS.SimSpec sym arch (RefineLocations sym arch))
   | PruneBranch ConditionKind
   | AlignControlFlowRefinment ConditionKind
 
