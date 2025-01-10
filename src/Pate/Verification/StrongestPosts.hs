@@ -914,14 +914,16 @@ withWorkItem gr0 f = do
       PairGraph sym arch ->
       EquivM sym arch (Maybe (GraphNode arch), PairGraph sym arch)  
     processNode nd gr1 = do
-      spec <- evalPG gr1 $ getCurrentDomainM nd
-      PS.viewSpec spec $ \scope d -> do
-        emitTrace @"debug" $ "runPendingActions"
-        runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
-          Just gr2 -> do
-            emitTrace @"debug" $ "Actions Executed, returning..."
-            return $ (Nothing, gr2)
-          Nothing -> return $ (Just nd, gr1)
+      case getCurrentDomain gr1 nd of
+        Just spec -> do
+          PS.viewSpec spec $ \scope d -> do
+            emitTrace @"debug" $ "runPendingActions"
+            runPendingActions refineActions nd (TupleF2 scope d) gr1 >>= \case
+              Just gr2 -> do
+                emitTrace @"debug" $ "Actions Executed, returning..."
+                return $ (Nothing, gr2)
+              Nothing -> return $ (Just nd, gr1)
+        Nothing -> fail $ "Missing domain for: " ++ show nd
 
 -- | Execute the forward dataflow fixpoint algorithm.
 --   Visit nodes and compute abstract domains until we propagate information
