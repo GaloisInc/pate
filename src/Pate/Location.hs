@@ -287,6 +287,9 @@ instance Ord (SomeLocation sym arch) where
             LTF -> LT
             GTF -> GT
 
+instance forall sym arch. PEM.ExprMappable sym (SomeLocation sym arch) where
+  mapExpr sym f (SomeLocation l) = SomeLocation <$> PEM.mapExpr sym f l
+
 instance (W4.IsSymExprBuilder sym, MM.RegisterInfo (MM.ArchReg arch)) => IsTraceNode '(sym :: DK.Type,arch :: DK.Type) "loc" where
   type TraceNodeType '(sym,arch) "loc" = SomeLocation sym arch
   prettyNode () (SomeLocation l) = PP.pretty (showLoc l) PP.<> ":" PP.<+> PP.pretty l

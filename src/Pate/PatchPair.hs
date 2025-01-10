@@ -31,6 +31,7 @@ module Pate.PatchPair (
   , PatchPairT
   , PatchPairC
   , pattern PatchPairC
+  , lensC
   , runPatchPairT
   , runPatchPairT'
   , handleSingletonStub
@@ -50,6 +51,7 @@ module Pate.PatchPair (
   , get
   , set
   , view
+  , lens
   , asTuple
   , fromTuple
   , fromMaybes
@@ -57,6 +59,7 @@ module Pate.PatchPair (
   , LiftF(..)
   , PatchPairF
   , pattern PatchPairF
+  , lensF
   , PatchPairMaybeCases(..)
   , toMaybeCases
   , forBins2
@@ -74,6 +77,7 @@ module Pate.PatchPair (
   , toSingleton
   , zip
   , WithBin(..)
+  , matchShape
   ) where
 
 import           Prelude hiding (zip, map, traverse)
@@ -106,6 +110,7 @@ import What4.JSON
 import Control.Monad.State.Strict (StateT (..), put)
 import qualified Control.Monad.State.Strict as CMS
 import           Control.Applicative ( (<|>) )
+import qualified Control.Lens as L
 
 -- | A pair of values indexed based on which binary they are associated with (either the
 --   original binary or the patched binary).
@@ -139,6 +144,20 @@ pattern PatchPairOriginal a = PatchPairSingle PB.OriginalRepr a
 
 pattern PatchPairPatched :: tp PB.Patched -> PatchPair tp
 pattern PatchPairPatched a = PatchPairSingle PB.PatchedRepr a
+
+lens ::
+  PB.WhichBinaryRepr bin ->
+  k bin {- ^ default value -} ->
+  L.Lens' (PatchPair k) (k bin)
+lens bin default_ f ppair = case (bin, ppair) of
+  (PB.OriginalRepr, PatchPair a b) -> fmap (\k -> PatchPair k b) (f a)
+  (PB.PatchedRepr, PatchPair a b) -> fmap (\k -> PatchPair a k) (f b)
+  (PB.OriginalRepr, PatchPairOriginal a) -> fmap (\k -> PatchPairOriginal k) (f a)
+  (PB.PatchedRepr, PatchPairPatched b) -> fmap (\k -> PatchPairPatched k) (f b)
+  (PB.OriginalRepr, PatchPairPatched b) -> fmap (\k -> PatchPair k b) (f default_)
+  (PB.PatchedRepr, PatchPairOriginal a) -> fmap (\k -> PatchPair a k) (f default_)
+
+
 
 {-# COMPLETE PatchPair, PatchPairSingle #-}
 {-# COMPLETE PatchPair, PatchPairOriginal, PatchPairPatched #-}
@@ -338,11 +357,34 @@ asSingleton _ = throwPairErr
 -- | Convert a 'PatchPair' into a singleton containing only
 --   a value for the given binary 'bin'.
 toSingleton ::
+  HasCallStack =>
   PatchPairM m =>
   PB.WhichBinaryRepr bin -> 
   PatchPair tp ->
   m (PatchPair tp)
 toSingleton bin pPair = PatchPairSingle bin <$> get bin pPair
+
+-- | Produce a 'PatchPair' with the same shape as a given pair by filling missing fields
+--   with a given default value, or dropping values, as needed.
+matchShape ::
+  Monad m =>
+  PatchPair tp1 ->
+  PatchPair tp2 ->
+  (forall bin. PB.WhichBinaryRepr bin -> m (tp2 bin)) ->
+  m (PatchPair tp2)
+matchShape p1 p2 f = case (p1, p2) of
+  (PatchPair{}, PatchPair{}) -> return p2
+  (PatchPairSingle bin1 _, PatchPairSingle bin2 x2) -> case PB.binCases bin1 bin2 of
+    Left Refl -> return p2
+    Right Refl -> do
+      x1 <- f bin1
+      return $ mkPair bin1 x1 x2
+  (PatchPair{}, PatchPairSingle bin2 x2) -> do
+    x1 <- f (PB.flipRepr bin2)
+    return $ mkPair bin2 x2 x1
+  (PatchPairSingle bin1 _, PatchPair x1 x2) -> case bin1 of
+    PB.OriginalRepr -> return $ PatchPairSingle PB.OriginalRepr x1
+    PB.PatchedRepr -> return $ PatchPairSingle PB.PatchedRepr x2
 
 -- | Create a 'PatchPair' with a shape according to 'getPairRepr'.
 --   The provided function execution for both the original and patched binaries
@@ -400,6 +442,12 @@ type PatchPairC tp = PatchPair (Const tp)
 pattern PatchPairC :: tp -> tp -> PatchPair (Const tp)
 pattern PatchPairC a b = PatchPair (Const a) (Const b)
 
+lensC ::
+  PB.WhichBinaryRepr bin ->
+  k {- ^ default value -} ->
+  L.Lens' (PatchPairC k) k
+lensC bin default_ = (lens bin (Const default_) . (\f -> fmap Const . f . getConst))
+
 {-# COMPLETE PatchPairC, PatchPairSingle #-}
 {-# COMPLETE PatchPairC, PatchPairOriginal, PatchPairPatched #-}
 
@@ -409,6 +457,9 @@ forBinsC :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRep
 forBinsC f = forBins $ \bin -> Const <$> f bin
 
 newtype LiftF (t :: l -> DK.Type) (f :: k -> l) (tp :: k) = LiftF { unLiftF :: (t (f tp)) }
+
+liftFLens :: L.Lens' (LiftF k tp bin) (k (tp bin))
+liftFLens f (LiftF v) = fmap LiftF (f v)
 
 instance Show (t (f tp)) => Show (LiftF t f tp) where
   show (LiftF x) = show x 
@@ -424,6 +475,11 @@ pattern PatchPairF a b = PatchPair (LiftF a) (LiftF b)
 {-# COMPLETE PatchPairF, PatchPairSingle #-}
 {-# COMPLETE PatchPairF, PatchPairOriginal, PatchPairPatched #-}
 
+lensF ::
+  PB.WhichBinaryRepr bin ->
+  k (tp bin) {- ^ default value -} ->
+  L.Lens' (PatchPairF k tp) (k (tp bin))
+lensF bin default_ = (lens bin (LiftF default_) . liftFLens)
 
 forBinsF :: PatchPairM m => (forall bin. PB.KnownBinary bin => PB.WhichBinaryRepr bin -> m (t (f bin))) -> m (PatchPairF t f)
 forBinsF f = forBins $ \bin -> LiftF <$> f bin

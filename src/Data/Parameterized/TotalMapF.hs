@@ -32,6 +32,7 @@ module Data.Parameterized.TotalMapF
     , zip
     , mapWithKey
     , traverseWithKey
+    , toList
   ) where
 
 import           Prelude hiding ( zip )
