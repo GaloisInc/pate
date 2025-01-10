@@ -40,6 +40,7 @@ module Pate.Verification.PairGraph.Node (
   , mkNodeReturn
   , rootEntry
   , rootReturn
+  , isRootNode
   , nodeBlocks
   , nodeFuns
   , returnToEntry
@@ -342,6 +343,13 @@ rootEntry pPair = NodeEntry (CallingContext [] (SomeDivergePoint Nothing)) pPair
 
 rootReturn :: PPa.PatchPair (PB.FunctionEntry arch) -> NodeReturn arch
 rootReturn pPair = NodeReturn (CallingContext [] (SomeDivergePoint Nothing)) pPair
+
+-- | A root node is a function entry point without any ancestors in its calling context
+isRootNode :: GraphNode' arch qbin -> Bool
+isRootNode nd = case nd of
+  GraphNode ne | functionEntryOf ne == ne, CallingContext [] _ <- nodeContext nd -> True
+  _ -> False
+
 
 addContext :: PB.BinaryPair (PB.ConcreteBlock arch) qbin1 -> NodeEntry' arch qbin2 -> NodeEntry' arch qbin2
 addContext newCtx' ne@(NodeEntry (CallingContext ctx d) blks) = 

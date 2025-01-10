@@ -1243,12 +1243,23 @@ pairGraphComputeVerdict ::
 pairGraphComputeVerdict gr =
   if Map.null (pairGraphObservableReports gr) &&
      Map.null (pairGraphDesyncReports gr) &&
+     not (unsolvedAsserts gr) &&
      Set.null (pairGraphGasExhausted gr) then
     case filter (\(_,condK) -> case condK of {ConditionEquiv{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
       [] -> PE.Equivalent
       _ -> PE.ConditionallyEquivalent
   else
     PE.Inequivalent
+
+unsolvedAsserts ::
+  PairGraph sym arch -> Bool
+unsolvedAsserts pg = 
+  let 
+    cond_nodes = Map.keys (pairGraphConditions pg)
+    go (nd, condK) = case condK of
+      ConditionAsserted{} -> isRootNode nd
+      _ -> False
+  in any go cond_nodes
 
 -- | Drop the given node from the work queue if it is queued.
 --   Otherwise do nothing.
