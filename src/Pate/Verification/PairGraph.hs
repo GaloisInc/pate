@@ -1744,6 +1744,29 @@ handleSingleSidedReturnTo priority ne = case asSingleNodeEntry ne of
       False -> return ()
   Nothing -> return ()
 
+-- | Determine if a two-sided node is the result of a control flow merge, and return
+--   the divergence point.
+--   Previously this was stored in the node itself, now it must be recovered by
+--   considering the single-sided ancestors of the given node.
+divergeOfMergedSync ::
+  forall sym arch qbin.
+  GraphNode' arch qbin ->
+  PairGraphM sym arch (Maybe (GraphNode' arch Qu.AllK))
+divergeOfMergedSync nd = withKnownBin nd $ do
+  pg <- get
+  let backs = getBackEdgesFrom pg (Qu.coerceToExists nd)
+  let singles = mapMaybe asSingleNode (Set.toList backs)
+  let (singleO :: [SingleNodeEntry arch PBi.Original]) = do
+        Some (Qu.AsSingle (GraphNode ne)) <- singles
+        Just Refl <- return $ testEquality (singleEntryBin ne) PBi.OriginalRepr
+        return ne
+  let (singleP :: [SingleNodeEntry arch PBi.Patched]) = do
+        Some (Qu.AsSingle (GraphNode ne)) <- singles
+        Just Refl <- return $ testEquality (singleEntryBin ne) PBi.PatchedRepr
+        return ne
+  let merged = [ (GraphNode m, singleNodeDivergence nO) | nO <- singleO, nP <- singleP, Just m <- [combineSingleEntries nO nP] ]
+  return $ lookup (Qu.coerceToExists nd) merged
+
 
 -- | Queue all sync points that correspond to this node.
 --   Returns False if the given node is not a sync point.
@@ -1753,17 +1776,19 @@ queueSyncNodeMerge ::
   GraphNode' arch qbin -> 
   PairGraphM sym arch Bool
 queueSyncNodeMerge priority node = fmap (fromMaybe False) <$> tryPG $ do
-  dp <- pgMaybe "getDivergePoint" $ getDivergePoint' node
-  GraphNode node' <- toTwoSidedNode node
+  divergeOfMergedSync node >>= \case
+    Just dp -> do
+      GraphNode node' <- toTwoSidedNode node
 
-  syncO <- getSyncData syncPoints PBi.OriginalRepr dp
-  syncP <- getSyncData syncPoints PBi.PatchedRepr dp
+      syncO <- getSyncData syncPoints PBi.OriginalRepr dp
+      syncP <- getSyncData syncPoints PBi.PatchedRepr dp
 
-  GraphNode (sneO :: SingleNodeEntry arch PBi.Original) <- return $ Qu.coerceQuant (GraphNode node')
-  GraphNode (sneP :: SingleNodeEntry arch PBi.Patched) <- return $ Qu.coerceQuant (GraphNode node')
+      GraphNode (sneO :: SingleNodeEntry arch PBi.Original) <- return $ Qu.coerceQuant (GraphNode node')
+      GraphNode (sneP :: SingleNodeEntry arch PBi.Patched) <- return $ Qu.coerceQuant (GraphNode node')
 
-  let hasO = filter (\sp -> syncPointNode sp == sneO) (Set.toList syncO)
-  let hasP = filter (\sp -> syncPointNode sp == sneP) (Set.toList syncP)
-  let syncs = [(x,y) | x <- hasO, y <- hasP]
-  forM_ syncs $ \(x,y) -> queueSyncPoints priority x y
-  return $ not (null syncs)
+      let hasO = filter (\sp -> syncPointNode sp == sneO) (Set.toList syncO)
+      let hasP = filter (\sp -> syncPointNode sp == sneP) (Set.toList syncP)
+      let syncs = [(x,y) | x <- hasO, y <- hasP]
+      forM_ syncs $ \(x,y) -> queueSyncPoints priority x y
+      return $ not (null syncs)
+    Nothing -> return False
