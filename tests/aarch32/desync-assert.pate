@@ -1,0 +1,53 @@
+Choose Entry Point
+    > Function Entry "_start"
+
+0x1012c [ via: "f" (0x10120) <- "_start" (0x101c0) ] 
+  Handle observable difference:
+    > Emit warning and continue
+
+
+0x1012c [ via: "f" (0x10120) <- "_start" (0x101c0) ]
+    ...
+    Return (original) vs. Call to: "g" (0x100d8)
+        ...
+            ...
+            > Choose desynchronization points
+
+            Choose a desynchronization point:
+                > 0x1016c (patched)
+                > 0x1016c (original)
+
+0x1016c [ via: "f" (0x10120) <- "_start" (0x101c0) ] 
+    ...
+    Return (original) vs. Call to: "g" (0x100d8)
+        ...
+            ...
+            > Choose synchronization points
+
+            Choose a synchronization point:
+                > 0x10180 (patched)
+                > 0x10180 (original)
+                > Finish Choosing
+
+  
+0x10180 [ via: "f"
+  Modify Proof Node
+  Add Assertion
+    > 0: Assert condition
+  
+  Handle observable difference:
+    > Emit warning and continue
+  
+  Include Location:
+    > 1+bvSum cstack_base
+    > Finish
+  
+  Handle observable difference
+    > Assert difference is infeasible (defer proof)
+
+
+Verification Finished
+Continue verification?
+    > Finish and view final result
+
+

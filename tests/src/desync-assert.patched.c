@@ -6,17 +6,21 @@ int OBSERVE __attribute__((section(".output"))) = -12;
 
 #pragma noinline
 void g() {
-  Y--;
+  Y = Y - 1;
+}
+
+#pragma noinline
+void h() {
+  return;
 }
 
 #pragma noinline
 void f() {
+  h();
   if (X < 0 || Y < 0 || X > 100 || Y > 100) {
     return;
   }
   g();
-  asm("nop");
-  asm("nop");
   asm("nop");
   asm("nop");
   asm("nop");
