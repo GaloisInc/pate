@@ -932,11 +932,11 @@ propagateOne ::
   GraphNode arch {- ^ to -} ->
   ConditionKind ->
   PairGraph sym arch ->
-  EquivM sym arch (PropagateCase, PairGraph sym arch)
+  EquivM sym arch ((PropagateCase, PEC.EquivalenceCondition sym arch v), PairGraph sym arch)
 propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
   Nothing -> do
     emitTrace @"debug" "No condition to propagate"
-    return (ConditionNotPropagated, gr0)
+    return ((ConditionNotPropagated, PEC.universal sym), gr0)
   Just{} -> do
     -- take the condition of the target edge and bind it to
     -- the output state of the bundle
@@ -951,10 +951,10 @@ propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getConditio
       Just False -> do
         emitTrace @"message" "Condition is infeasible, dropping branch."
         gr1 <- pruneCurrentBranch scope (from,to) condK gr0
-        return (ConditionInfeasible, gr1)
+        return ((ConditionInfeasible, cond), gr1)
       _ | not (shouldPropagate (getPropagationKind gr0 to condK)) -> do
         emitTrace @"debug" "Condition not propagated"
-        return (ConditionNotPropagated, gr0)
+        return ((ConditionNotPropagated, cond), gr0)
       _ -> do
         not_cond <- liftIO $ W4.notPred sym cond_pred
         isPredSat' goalTimeout not_cond >>= \case
@@ -962,13 +962,13 @@ propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getConditio
           -- don't need any changes
           Just False -> do
             emitTraceLabel @"expr" (ExprLabel $ "Proven " ++ conditionName condK) (Some cond_pred) 
-            return (ConditionNotPropagated, gr0)
+            return ((ConditionNotPropagated, cond), gr0)
           -- we need more assumptions for this condition to hold
           Just True -> do
             emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
             let propK = getPropagationKind gr0 to condK
             gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr0
-            return $ (ConditionPropagated, markEdge from to gr1)
+            return $ ((ConditionPropagated, cond), markEdge from to gr1)
           Nothing -> throwHere $ PEE.InconclusiveSAT
 
 
@@ -986,8 +986,8 @@ propagateCondition ::
   EquivM sym arch (PropagateCase, PairGraph sym arch)
 propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
   priority <- thisPriority
-  (pcase, gr1) <- withPG gr0 $ do
-    pcases <- mapM go [minBound..maxBound]
+  (pcases, gr1) <- go [ConditionAssumed, ConditionEquiv, ConditionAsserted] gr0
+  (pcase, gr2) <- withPG gr1 $ do
     let anyInfeasible = any ((==) ConditionInfeasible) pcases
     case anyInfeasible of
       True -> return ConditionInfeasible
@@ -1011,15 +1011,27 @@ propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
   -- manages all of the needed bookkeeping surrounding matching up variables
   -- from both sides of the analysis.
   case (isSingleNode from, isSingleNode to) of
-        (Just{}, Just{}) -> return $ (pcase, gr1)
-        (Nothing, Nothing) -> return $ (pcase, gr1)
+        (Just{}, Just{}) -> return $ (pcase, gr2)
+        (Nothing, Nothing) -> return $ (pcase, gr2)
         -- special case, where we want to retain the fact that one of the
         -- conditions is infeasible but we don't want to do any graph maintenance
         _ | pcase == ConditionInfeasible -> return $ (ConditionInfeasible, gr0)
         _ -> return (ConditionNotPropagated, gr0)
 
   where
-    go condK = liftEqM (propagateOne scope bundle from to condK)
+    go [] gr = return ([],gr)
+    go (condK:conds) gr =  do
+      ((pcase, cond), gr') <- propagateOne scope bundle from to condK gr
+      case pcase of
+        ConditionInfeasible -> do
+          (pcases, gr'') <- go conds gr'
+          return (pcase:pcases, gr'')
+        _ -> do
+          (cond_pred :: W4.Pred sym) <- withSym $ \sym -> PEC.toPred sym cond
+          withAssumption cond_pred $ do
+            (pcases, gr'') <- go conds gr'
+            return (pcase:pcases, gr'')
+
 
 
 -- | Given the results of symbolic execution, and an edge in the pair graph

@@ -627,7 +627,7 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
     let do_widen binds pg = fnTrace "do_widen" $ do
           atPriority (raisePriority pr) (Just "Starting Split Analysis") $  do
             pg2 <- propagateOne scope bundle nd nd_single ConditionAsserted pg >>= \case
-              (ConditionNotPropagated, pg1) -> return pg1
+              ((ConditionNotPropagated, _), pg1) -> return pg1
               (_, pg1) -> rewrite_assert binds pg1
 
             withAssumptionSet (PAS.fromExprBindings binds) $ withGraphNode' scope nd bundle dom pg2 $ do
@@ -822,7 +822,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
               liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) nd syncNode ConditionAsserted pg_ >>= \case
-                (ConditionNotPropagated, pg_') -> 
+                ((ConditionNotPropagated, _), _) -> 
                   -- bindings already assumed above
                   return (W4.truePred sym, pg_)
                 (_, pg_') -> do
@@ -1525,7 +1525,7 @@ withConditionsAssumed ::
   EquivM_ sym arch (PairGraph sym arch) ->
   EquivM sym arch (PairGraph sym arch)
 withConditionsAssumed scope bundle d node gr0 f = do
-  foldr go f' [minBound..maxBound]
+  foldr go f' [ConditionAsserted, ConditionEquiv, ConditionAssumed]
   where 
     f' = withSym $ \sym -> case asSingleNode node of
       Just (Some (Qu.AsSingle snode)) -> 
