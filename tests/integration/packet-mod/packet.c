@@ -29,7 +29,8 @@ void log_info(int log_msg, uint8_t value) {
 
 #pragma noinline
 int parse_data(void* buffer, uint8_t* size, FILE *stream) {
-  fread(buffer, *size, 1, stream);
+  int result_len = fread(buffer, *size, 1, stream);
+  log_info(LOG_READ_RESULT, result_len);
   return EXIT_SUCCESS;
 }
 
