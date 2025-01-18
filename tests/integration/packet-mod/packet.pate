@@ -1,13 +1,6 @@
 Choose Entry Point
   > Function Entry "parse_packet"
 
-Function Entry "log_info"
-  ...
-    Call to: "print"
-    ...
-    Handle observable difference:
-      > Avoid difference with equivalence condition
-
 segment1+0x5e8
   ...
     Call to: "printf"
@@ -15,12 +8,14 @@ segment1+0x5e8
     Handle observable difference:
       > Avoid difference with equivalence condition
 
-Function Entry "log_info" (segment1+0x584) [ via: "parse_data"
+
+segment1+0x5f8 [ via: "log_info" (segment1+0x584) <- "parse_data"
   ...
-    Call to: "print"
+    Call to: "printf"
     ...
     Handle observable difference:
       > Assert difference is infeasible (prove immediately)
 
+Verification Finished
 Continue verification?
-  > Finish and view final result
+    > Finish and view final result

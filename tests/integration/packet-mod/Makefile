@@ -34,3 +34,5 @@ packet.patched-bad.exe: packet.c | docker
 run: packet.original.exe packet.patched.exe packet.pate
 	$(PATE) --original packet.original.exe --patched packet.patched.exe -s parse_packet --script packet.pate
 
+run-bad: packet.original.exe packet.patched-bad.exe packet.pate
+	$(PATE) --original packet.original.exe --patched packet.patched-bad.exe -s parse_packet --script packet.pate
