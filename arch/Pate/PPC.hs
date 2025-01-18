@@ -328,7 +328,8 @@ stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r3 
       , ("write", PA.mkWriteOverride "write" r3 r4 r5 r3)
       -- FIXME: fixup arguments for fwrite
       , ("fwrite", PA.mkWriteOverride "fwrite" r3 r4 r5 r3)
-      , ("printf", PA.mkObservableOverride "printf" r3 r4)
+      
+      , ("printf", PA.mkObservableOverride "printf" r3 [r3, r4])
       
       -- FIXME: added for relaySAT challenge problem
       , ("CFE_SB_AllocateMessageBuffer", PA.mkMallocOverride' (Just (PA.MemIndPointer (PA.MemPointer 0x00013044) 0x7c)) r3 r3)

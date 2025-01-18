@@ -269,7 +269,7 @@ stubOverrides =
     case PB.fnSymBase fs of
       -- FIXME: multiple variants of this constructor
       "basic_string" -> Just $ PA.mkDefaultStubOverride "basic_string" r0
-      "print" -> Just $ PA.mkObservableOverride "print" r0 r1
+      "print" -> Just $ PA.mkObservableOverride "print" r0 [r0]
       _ -> lookup (PB.fnSymBase fs) override_list
   where
     override_list =
@@ -282,8 +282,8 @@ stubOverrides =
       , ("write", PA.mkWriteOverride "write" r0 r1 r2 r0)
       -- FIXME: fixup arguments for fwrite (len = size * nmemb)
       , ("fwrite", PA.mkWriteOverride "fwrite" r3 r0 r1 r0)
-      , ("printf", PA.mkObservableOverride "printf" r0 r1)
-      , ("puts", PA.mkObservableOverride "puts" r0 r0)
+      , ("printf", PA.mkObservableOverride "printf" r0 [r0,r1])
+      , ("puts", PA.mkObservableOverride "puts" r0 [r0,r1])
       -- fixme: double check this
       , ("ceilf", PA.mkDefaultStubOverrideArg "ceilf" [Some v0] r0)
       -- FIXME: check abi for args
