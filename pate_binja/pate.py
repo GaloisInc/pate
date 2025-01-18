@@ -607,6 +607,9 @@ class PateWrapper:
             if not lastTopLevelResult:
                 out.write(f'No equivalence conditions found\n')
             else:
+                eqStatus = lastTopLevelResult.get('content', {}).get('eq_status')
+                out.write(f'Equivalence status: {eqStatus}\n')
+                out.write('\n')
                 eqconds = lastTopLevelResult.get('content', {}).get('eq_conditions', {}).get('map')
                 if eqconds:
                     # Found eq conditions
@@ -636,8 +639,8 @@ class PateWrapper:
                         # out.write('\nTrace False\n')
                         # pprint_node_event_trace(trace_false, 'False Trace', out=out)
 
-                else:
-                    # Hack to handle case where constraints were unsatisfiable
+                elif cfarNode:
+                    # Handle case where trace constraints were unsatisfiable
                     ect = cfarNode.equivalenceConditionTrace
                     ect.trace_true = False
                     ect.trace_false = False
