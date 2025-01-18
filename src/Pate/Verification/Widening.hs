@@ -945,7 +945,7 @@ propagateOne scope bundle preconds from to condK gr0 = withSym $ \sym -> case ge
     -- weaken the result with any given preconditions
     cond_ <- do
       cond_ <- getEquivPostCondition scope bundle to condK gr0
-      foldM (\precond c -> PEC.toPred sym precond >>= \p -> PEC.weaken sym p c) cond_ preconds
+      foldM (\c precond -> PEC.toPred sym precond >>= \p -> PEC.weaken sym p c) cond_ preconds
 
     simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
     cond <- PSi.applySimplifier simplifier cond_
