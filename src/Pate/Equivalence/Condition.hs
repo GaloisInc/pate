@@ -111,14 +111,16 @@ weaken ::
   W4.Pred sym ->
   EquivalenceCondition sym arch v ->
   m (EquivalenceCondition sym arch v)  
-weaken sym p cond = do
-  mem <- WPM.weaken sym p (eqCondMem cond)
-  regs <- weakenRegCond sym p (eqCondRegs cond)
-  let (PAS.NamedAsms mr) = (eqCondMaxRegion cond)
-  mrCond <- PAS.NamedAsms <$> PAS.weaken sym p mr
-  let (PAS.NamedAsms pc) = (eqCondExtraCond cond)
-  pcond <- PAS.NamedAsms <$> PAS.weaken sym p pc
-  return $ EquivalenceCondition mem regs mrCond pcond
+weaken sym p cond = case W4.asConstantPred p of
+  Just True -> return cond
+  _ -> do
+    mem <- WPM.weaken sym p (eqCondMem cond)
+    regs <- weakenRegCond sym p (eqCondRegs cond)
+    let (PAS.NamedAsms mr) = (eqCondMaxRegion cond)
+    mrCond <- PAS.NamedAsms <$> PAS.weaken sym p mr
+    let (PAS.NamedAsms pc) = (eqCondExtraCond cond)
+    pcond <- PAS.NamedAsms <$> PAS.weaken sym p pc
+    return $ EquivalenceCondition mem regs mrCond pcond
 
 -- | Preconditions for graph nodes. These represent additional conditions
 --   that must be true for the equivalence domain of the node to be considered

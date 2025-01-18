@@ -626,7 +626,9 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
 
     let do_widen binds pg = fnTrace "do_widen" $ do
           atPriority (raisePriority pr) (Just "Starting Split Analysis") $  do
-            pg2 <- propagateOne scope bundle nd nd_single ConditionAsserted pg >>= \case
+            asms <- forM [ConditionAssumed, ConditionEquiv] $ \condK -> 
+              getEquivPostCondition scope bundle nd_single condK pg
+            pg2 <- propagateOne scope bundle asms nd nd_single ConditionAsserted pg >>= \case
               ((ConditionNotPropagated, _), pg1) -> return pg1
               (_, pg1) -> rewrite_assert binds pg1
 
@@ -821,7 +823,9 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               let sne_other = Qu.quantEach snePair (PBi.flipRepr bin) 
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
-              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) nd syncNode ConditionAsserted pg_ >>= \case
+              asms <- forM [ConditionAssumed, ConditionEquiv] $ \condK -> 
+                evalEqM $ getEquivPostCondition scope (singleBundle sbundle) syncNode condK
+              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) asms nd syncNode ConditionAsserted pg_ >>= \case
                 ((ConditionNotPropagated, _), _) -> 
                   -- bindings already assumed above
                   return (W4.truePred sym, pg_)

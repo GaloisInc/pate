@@ -36,6 +36,7 @@ module Pate.Verification.Widening
   , getTraceFootprint
   , propagateCondition
   , propagateOne
+  , getEquivPostCondition
   , PropagateCase(..)
   ) where
 
@@ -928,24 +929,30 @@ propagateOne ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
+  [PEC.EquivalenceCondition sym arch v] -> {- ^ weaken the propagated condition with assumptions -}
   GraphNode arch {- ^ from -} ->
   GraphNode arch {- ^ to -} ->
   ConditionKind ->
   PairGraph sym arch ->
   EquivM sym arch ((PropagateCase, PEC.EquivalenceCondition sym arch v), PairGraph sym arch)
-propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
+propagateOne scope bundle preconds from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
   Nothing -> do
     emitTrace @"debug" "No condition to propagate"
     return ((ConditionNotPropagated, PEC.universal sym), gr0)
   Just{} -> do
     -- take the condition of the target edge and bind it to
     -- the output state of the bundle
-    cond_ <- getEquivPostCondition scope bundle to condK gr0
+    -- weaken the result with any given preconditions
+    cond_ <- do
+      cond_ <- getEquivPostCondition scope bundle to condK gr0
+      foldM (\precond c -> PEC.toPred sym precond >>= \p -> PEC.weaken sym p c) cond_ preconds
+
     simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
     cond <- PSi.applySimplifier simplifier cond_
         -- check if the "to" condition is already satisifed, otherwise
         -- we need to update our own condition
     cond_pred <- PEC.toPred sym cond
+
     goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
     isPredSat' goalTimeout cond_pred >>= \case
       Just False -> do
@@ -986,7 +993,7 @@ propagateCondition ::
   EquivM sym arch (PropagateCase, PairGraph sym arch)
 propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
   priority <- thisPriority
-  (pcases, gr1) <- go [ConditionAssumed, ConditionEquiv, ConditionAsserted] gr0
+  (pcases, gr1) <- go [] [ConditionAssumed, ConditionEquiv, ConditionAsserted] gr0
   (pcase, gr2) <- withPG gr1 $ do
     let anyInfeasible = any ((==) ConditionInfeasible) pcases
     case anyInfeasible of
@@ -1019,18 +1026,25 @@ propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
         _ -> return (ConditionNotPropagated, gr0)
 
   where
-    go [] gr = return ([],gr)
-    go (condK:conds) gr =  do
-      ((pcase, cond), gr') <- propagateOne scope bundle from to condK gr
+    go _ [] gr = return ([],gr)
+    go preconds (condK:conds) gr =  do
+      ((pcase, cond), gr') <- propagateOne scope bundle preconds from to condK gr
       case pcase of
-        ConditionInfeasible -> do
-          (pcases, gr'') <- go conds gr'
+        -- we need to collect any non-propagated conditions so that
+        -- propagated conditions are weakened with them
+        -- i.e. we need to retain the fact that asserted conditions need
+        -- only be provable under the assumed conditions
+        ConditionNotPropagated -> do
+          (pcases, gr'') <- go (cond:preconds) conds gr'
           return (pcase:pcases, gr'')
-        _ -> do
-          (cond_pred :: W4.Pred sym) <- withSym $ \sym -> PEC.toPred sym cond
-          withAssumption cond_pred $ do
-            (pcases, gr'') <- go conds gr'
-            return (pcase:pcases, gr'')
+        -- give up early if any conditions are infeasible, since 
+        -- we'll necessarily be assuming/asserting that this branch is
+        -- unreachable
+        ConditionInfeasible -> return ([pcase], gr')
+        -- for propagated conditions we don't need any weakening
+        ConditionPropagated -> do
+          (pcases, gr'') <- go preconds conds gr'
+          return (pcase:pcases, gr'')
 
 
 

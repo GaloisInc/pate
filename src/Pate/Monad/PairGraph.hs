@@ -22,6 +22,7 @@ module Pate.Monad.PairGraph
   , catchPG
   , liftEqM
   , liftEqM_
+  , evalEqM
   , initializePairGraph
   , initialDomain
   , initialDomainSpec
@@ -146,6 +147,12 @@ liftEqM_ ::
   (PairGraph sym arch -> EquivM_ sym arch (PairGraph sym arch)) -> 
   StateT (PairGraph sym arch) (EquivM_ sym arch) ()
 liftEqM_ f = liftEqM $ \pg -> ((),) <$> (f pg)
+
+evalEqM :: 
+  HasCallStack =>
+  (PairGraph sym arch -> EquivM_ sym arch a) -> 
+  StateT (PairGraph sym arch) (EquivM_ sym arch) a
+evalEqM f = liftEqM $ \pg -> f pg >>= \a -> return (a, pg)
 
 liftPartEqM_ :: 
   (PairGraph sym arch -> EquivM_ sym arch (Maybe (PairGraph sym arch))) -> 
