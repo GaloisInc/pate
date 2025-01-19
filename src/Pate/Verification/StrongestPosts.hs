@@ -612,12 +612,13 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
     mbindsThis <- lift $ lookupFnBindings scope (GraphNode sne) pg0
     mbindsOther <- lift $ lookupFnBindings scope sne_other pg0
 
-    let rewrite_assert exprBinds pg = fnTrace "rewrite_assert" $ case getCondition pg nd ConditionAsserted of
+    let rewrite_cond condK exprBinds pg = fnTrace "rewrite_cond" $ case getCondition pg nd condK of
           Just condSpec -> do
             cond <- liftIO $ PS.bindSpec sym (PS.scopeVarsPair scope) condSpec
             cond' <- PSi.applySimpStrategy (PSi.rewriteStrategy exprBinds) cond
             let condSpec' = PS.mkSimSpec scope cond'
-            let pg' = setCondition nd ConditionAsserted PropagateFull condSpec' pg
+            let propK = getPropagationKind pg nd condK
+            let pg' = setCondition nd ConditionAsserted propK condSpec' pg
             -- we need to schedule the ancestors here to ensure that the resulting
             -- assertion is propagated (if needed), since 'propagateOne' doesn't do this step
             return $ queueAncestors (lowerPriority pr) nd pg'
@@ -626,11 +627,10 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
 
     let do_widen binds pg = fnTrace "do_widen" $ do
           atPriority (raisePriority pr) (Just "Starting Split Analysis") $  do
-            asms <- forM [ConditionAssumed, ConditionEquiv] $ \condK -> 
-              getEquivPostCondition scope bundle nd_single condK pg
-            pg2 <- propagateOne scope bundle asms nd nd_single ConditionAsserted pg >>= \case
-              ((ConditionNotPropagated, _), pg1) -> return pg1
-              (_, pg1) -> rewrite_assert binds pg1
+            pg2 <- propagateOne scope bundle [ConditionAssumed, ConditionEquiv] nd nd_single ConditionAsserted pg >>= \case
+              (ConditionNotPropagated, pg1) -> return pg1
+              (ConditionPropagated preconds, pg1) -> foldM (\pg_ condK -> rewrite_cond condK binds pg_) pg1 preconds 
+              (ConditionInfeasible, pg1) -> rewrite_cond ConditionAsserted binds pg1
 
             withAssumptionSet (PAS.fromExprBindings binds) $ withGraphNode' scope nd bundle dom pg2 $ do
               widenAlongEdge scope bundle nd dom_single pg2 nd_single
@@ -823,10 +823,9 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               let sne_other = Qu.quantEach snePair (PBi.flipRepr bin) 
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
-              asms <- forM [ConditionAssumed, ConditionEquiv] $ \condK -> 
-                evalEqM $ getEquivPostCondition scope (singleBundle sbundle) syncNode condK
-              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) asms nd syncNode ConditionAsserted pg_ >>= \case
-                ((ConditionNotPropagated, _), _) -> 
+
+              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) [ConditionAssumed, ConditionEquiv] nd syncNode ConditionAsserted pg_ >>= \case
+                (ConditionNotPropagated, _) -> 
                   -- bindings already assumed above
                   return (W4.truePred sym, pg_)
                 (_, pg_') -> do
@@ -1529,7 +1528,7 @@ withConditionsAssumed ::
   EquivM_ sym arch (PairGraph sym arch) ->
   EquivM sym arch (PairGraph sym arch)
 withConditionsAssumed scope bundle d node gr0 f = do
-  foldr go f' [ConditionAsserted, ConditionEquiv, ConditionAssumed]
+  foldr go f' [ConditionEquiv, ConditionAssumed, ConditionAsserted]
   where 
     f' = withSym $ \sym -> case asSingleNode node of
       Just (Some (Qu.AsSingle snode)) -> 

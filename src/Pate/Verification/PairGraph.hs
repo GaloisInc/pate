@@ -423,7 +423,7 @@ data ConditionKind =
   | ConditionEquiv
   -- ^ a separate category for equivalence conditions, which should be shown
   --   to the user once the analysis is complete
-  deriving (Eq,Ord, Enum, Bounded)
+  deriving (Eq,Ord, Enum, Bounded, Show)
 
 data PropagateKind =
     PropagateFull
