@@ -283,7 +283,7 @@ stubOverrides =
       -- FIXME: fixup arguments for fwrite (len = size * nmemb)
       , ("fwrite", PA.mkWriteOverride "fwrite" r3 r0 r1 r0)
       , ("printf", PA.mkObservableOverride "printf" r0 [r0,r1])
-      , ("puts", PA.mkObservableOverride "puts" r0 [r0,r1])
+      , ("puts", PA.mkObservableOverride "puts" r0 [r0])
       -- fixme: double check this
       , ("ceilf", PA.mkDefaultStubOverrideArg "ceilf" [Some v0] r0)
       -- FIXME: check abi for args
