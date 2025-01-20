@@ -44,6 +44,7 @@ import qualified Pate.Equivalence.Error as PEE
 import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
 import           What4.ExprHelpers (Simplifier, SimpStrategy)
+import           What4.Simplify.Array
 import           Pate.TraceTree
 import qualified Data.Set as Set
 import Pate.AssumptionSet
@@ -247,7 +248,10 @@ prettySimplifier = deepPredicateSimplifier <> base <> unfoldDefsStrategy <> deep
 
     base :: SimpStrategy sym (EquivM_ sym arch)
     base = WEH.joinStrategy $ withValid $ 
-      return $ WEH.bvPrettySimplify <> WEH.memReadPrettySimplify <> WEH.collapseBVOps
+      return $ WEH.bvPrettySimplify 
+      <> WEH.memReadPrettySimplify 
+      <> WEH.collapseBVOps 
+      <> multiArraySimplify
 
 -- TODO: the "core" simplification strategy that stitches together the main strategies
 -- from 'What4.ExprHelpers'. These are implemented in "old" style (i.e. as expression
