@@ -384,17 +384,23 @@ class PateWrapper:
                             eqCond = ConditionTrace(ccontent)
                             match this:
                                 case 'Asserted':
-                                    #print('Found asserted cond for ', cfar_parent.id)
+                                    print('Found asserted cond for', cfar_parent.id)
                                     if cfar_parent.assertedConditionTrace:
                                         cfar_parent.assertedConditionTrace.update(ccontent)
                                     else:
                                         cfar_parent.assertedConditionTrace = ConditionTrace(ccontent)
-                                case 'Equivalence Condition Assumed':
-                                    #print('Found assumed cond for ', cfar_parent.id)
+                                case 'Assumed':
+                                    print('Found assumed cond for', cfar_parent.id)
                                     if cfar_parent.assumedConditionTrace:
                                         cfar_parent.assumedConditionTrace.update(ccontent)
                                     else:
                                         cfar_parent.assumedConditionTrace = ConditionTrace(ccontent)
+                                case 'Equivalence Condition Assumed':
+                                    print('Found equivalance conditions for', cfar_parent.id)
+                                    if cfar_parent.equivalenceConditionTrace:
+                                        cfar_parent.equivalenceConditionTrace.update(ccontent)
+                                    else:
+                                        cfar_parent.equivalenceConditionTrace = ConditionTrace(ccontent)
 
                     self.command('up')
                     # Consume result of up, but do not need it
