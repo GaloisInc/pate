@@ -218,13 +218,15 @@ class GuiUserInteraction(pate.PateUserInteraction):
         execute_on_main_thread_and_wait(lambda: self.pate_widget.ask_user(prompt, choices, replay_choice is not None))
         if replay_choice:
             execute_on_main_thread_and_wait(lambda: self.pate_widget.cmd_field.setText(replay_choice + ' (replay)'))
-        #Wait for user to respond to prompt. This happens on the GUI thread.
+
+        # Wait for user to respond which happens on the GUI thread.
         urc = self.pate_widget.user_response_condition
         with urc:
             while self.pate_widget.user_response is None:
                 urc.wait()
             choice = self.pate_widget.user_response
             self.pate_widget.user_response = None
+
         if replay_choice:
             choice = replay_choice
             execute_on_main_thread_and_wait(lambda: self.pate_widget.output_field.appendPlainText(f'PATE Command: {replay_choice} (replay)\n'))

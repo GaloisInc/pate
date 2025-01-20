@@ -384,17 +384,23 @@ class PateWrapper:
                             eqCond = ConditionTrace(ccontent)
                             match this:
                                 case 'Asserted':
-                                    #print('Found asserted cond for ', cfar_parent.id)
+                                    print('Found asserted cond for', cfar_parent.id)
                                     if cfar_parent.assertedConditionTrace:
                                         cfar_parent.assertedConditionTrace.update(ccontent)
                                     else:
                                         cfar_parent.assertedConditionTrace = ConditionTrace(ccontent)
-                                case 'Equivalence Condition Assumed':
-                                    #print('Found assumed cond for ', cfar_parent.id)
+                                case 'Assumed':
+                                    print('Found assumed cond for', cfar_parent.id)
                                     if cfar_parent.assumedConditionTrace:
                                         cfar_parent.assumedConditionTrace.update(ccontent)
                                     else:
                                         cfar_parent.assumedConditionTrace = ConditionTrace(ccontent)
+                                case 'Equivalence Condition Assumed':
+                                    print('Found equivalance conditions for', cfar_parent.id)
+                                    if cfar_parent.equivalenceConditionTrace:
+                                        cfar_parent.equivalenceConditionTrace.update(ccontent)
+                                    else:
+                                        cfar_parent.equivalenceConditionTrace = ConditionTrace(ccontent)
 
                     self.command('up')
                     # Consume result of up, but do not need it
@@ -895,6 +901,18 @@ class CFARNode:
                     pprint_node_event_trace(self.exit_meta_data[n]['ce_event_trace'], 'Counter-Example Trace', pre + '  ', out)
                 elif self.exit_meta_data.get(n, {}).get('event_trace'):
                     pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], 'Witness Trace', pre + '  ', out)
+
+        # Indicate if there are conditions traces
+        conditionTraceTypes = []
+        if self.equivalenceConditionTrace:
+            conditionTraceTypes.append('equivalence')
+        if self.assertedConditionTrace:
+            conditionTraceTypes.append('asserted')
+        if self.assumedConditionTrace:
+            conditionTraceTypes.append('assumed')
+        if conditionTraceTypes:
+            out.write('Condition traces for: ')
+            out.write(', '.join(conditionTraceTypes))
 
     def pprint_node_domain(self, pre: str = '', out: IO = sys.stdout,
                            show_ce_trace: bool = False):
