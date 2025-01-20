@@ -899,6 +899,18 @@ class CFARNode:
                 elif self.exit_meta_data.get(n, {}).get('event_trace'):
                     pprint_node_event_trace(self.exit_meta_data[n]['event_trace'], 'Witness Trace', pre + '  ', out)
 
+        # Indicate if there are conditions traces
+        conditionTraceTypes = []
+        if self.equivalenceConditionTrace:
+            conditionTraceTypes.append('equivalence')
+        if self.assertedConditionTrace:
+            conditionTraceTypes.append('asserted')
+        if self.assumedConditionTrace:
+            conditionTraceTypes.append('assumed')
+        if conditionTraceTypes:
+            out.write('Condition traces for: ')
+            out.write(', '.join(conditionTraceTypes))
+
     def pprint_node_domain(self, pre: str = '', out: IO = sys.stdout,
                            show_ce_trace: bool = False):
         if self.predomain:
