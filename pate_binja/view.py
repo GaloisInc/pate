@@ -145,16 +145,6 @@ class PateWidget(QWidget):
         self.cmd_field.setEnabled(True)
         self.cmd_field.setFocus()
 
-    def injectBinjaDissembly(self, original_lines, patched_lines):
-
-        obv = self.getOriginalBinaryView()
-        original_lines = list(map(lambda line: subDisassemblyForInstAddr(line, obv), original_lines))
-
-        pbv = self.getPatchedBinaryView()
-        patched_lines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patched_lines))
-
-        return original_lines, patched_lines
-
     def mcad_annotate_inst_tree(self, inst_tree: Optional[dict], bv: BinaryView):
         """Add MCAD cycle counts to instruction tree. NOOP if cycle counts all ready exist."""
         if not inst_tree:
@@ -372,8 +362,14 @@ class DiffWidget(QWidget):
     def redisplay(self):
         if self.linesA is not None and self.linesB is not None:
             # Show diff
-            html = generateHtmlDiff(self.linesA, self.labelA, self.linesB, self.labelB)
-            self.diffField.setHtml(html)
+            if self.linesA == self.linesB:
+                text = ''
+                text += f'No differences for {self.labelA} vs {self.labelB}\n'
+                text += '\n'.join(self.linesA)
+                self.diffField.setText(text)
+            else:
+                html = generateHtmlDiff(self.linesA, self.labelA, self.linesB, self.labelB)
+                self.diffField.setHtml(html)
         elif self.linesA is not None and self.linesB is None:
             # Just linesA, no diff
             text = ''
@@ -430,7 +426,10 @@ class TraceWidget(QWidget):
 
         # Replace addr lines with binja disassembly
         if pw:
-            originalLines, patchedLines = pw.injectBinjaDissembly(originalLines, patchedLines)
+            obv = pw.getOriginalBinaryView()
+            originalLines = list(map(lambda line: subDisassemblyForInstAddr(line, obv), originalLines))
+            pbv = pw.getPatchedBinaryView()
+            patchedLines = list(map(lambda line: subDisassemblyForInstAddr(line, pbv), patchedLines))
 
         if label is None:
             originalLabel = 'Original'
@@ -450,7 +449,7 @@ class TraceWidget(QWidget):
             # Only patched
             self.traceDiff.setLinesNoDiff(patchedLines, patchedLabel)
 
-    def setTracePosVsNeg(self, posTrace: Optional[dict], negTrace: Optional[dict]):
+    def setTracePosVsNeg(self, posTrace: Optional[dict], negTrace: Optional[dict], bv: BinaryView) -> None:
         if not (posTrace or negTrace):
             # Nothing to show
             self.traceDiff.clear('None')
@@ -477,8 +476,9 @@ class TraceWidget(QWidget):
             negLines = out.getvalue().splitlines()
 
         # Replace addr lines with binja disassembly
-        if pw:
-            posLines, negLines = pw.injectBinjaDissembly(posLines, negLines)
+        if bv:
+            posLines = list(map(lambda line: subDisassemblyForInstAddr(line, bv), posLines))
+            negLines = list(map(lambda line: subDisassemblyForInstAddr(line, bv), negLines))
 
         posLabel = 'EQUIVALENT'
         negLabel = 'DIFFERENT'
@@ -661,10 +661,18 @@ class PateCfarEqCondDialog(QDialog):
             if self.conditionTrace.trace_false:
                 patchedNegTrace = self.conditionTrace.trace_false.get('traces', {}).get('patched')
 
-            self.trueTraceWidget.setTracePosVsNeg(originalPosTrace, originalNegTrace)
+            pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+            if pw:
+                obv = pw.getOriginalBinaryView()
+                pbv = pw.getPatchedBinaryView()
+            else:
+                obv = None
+                pbv = None
+
+            self.trueTraceWidget.setTracePosVsNeg(originalPosTrace, originalNegTrace, pbv)
             self.trueTraceLabel.setText('Trace showing original program, EQUIVALENT vs DIFFERENT behaviour:')
-            self.falseTraceWidget.setTracePosVsNeg(patchedPosTrace, patchedNegTrace)
-            self.falseTraceLabel.setText('Trace showing patched program, EQUIVALENT vs different behaviour:')
+            self.falseTraceWidget.setTracePosVsNeg(patchedPosTrace, patchedNegTrace, obv)
+            self.falseTraceLabel.setText('Trace showing patched program, EQUIVALENT vs DIFFERENT behaviour:')
 
     def diffModeChanged(self, text):
         print('Difference mode:', self.diffModeComboBox.currentText())

@@ -1738,7 +1738,7 @@ def simplify_sexp(sexp, env=None):
 
     # ('_', 'extract', s, e)(n) => n<s,e>
     if (isinstance(op, list) and len(op) == 4 and op[0] == '_' and op[1] == 'extract'
-            and len(arg) == 1 and isinstance(arg[0], str)):
+            and len(arg) == 1):
         return f'{arg[0]}<{op[2]}:{op[3]}>'
 
     # Simplify call(F, args...) => F(args...)
