@@ -45,6 +45,7 @@ import           Pate.Monad
 import qualified What4.ExprHelpers as WEH
 import           What4.ExprHelpers (Simplifier, SimpStrategy)
 import           What4.Simplify.Array
+import           What4.Simplify.Bitvector (memWritePrettySimplify)
 import           Pate.TraceTree
 import qualified Data.Set as Set
 import Pate.AssumptionSet
@@ -241,7 +242,7 @@ unfoldDefsStrategy = WEH.joinStrategy $ withValid $ return $ WEH.SimpStrategy $ 
 --   Interleaved with the deep predicate simplifier in order to
 --   drop any redundant terms that are introduced.
 prettySimplifier :: forall sym arch. SimpStrategy sym (EquivM_ sym arch)
-prettySimplifier = deepPredicateSimplifier <> base <> unfoldDefsStrategy <> deepPredicateSimplifier <> unfoldDefsStrategy <> base
+prettySimplifier = deepPredicateSimplifier <> base <> unfoldDefsStrategy <> deepPredicateSimplifier <> unfoldDefsStrategy <> base <> (WEH.joinStrategy $ withValid $ return $ memWritePrettySimplify)
   where
     mem :: SimpStrategy sym (EquivM_ sym arch)
     mem = WEH.joinStrategy $ withValid $ return WEH.memReadPrettySimplify
