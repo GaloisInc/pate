@@ -196,26 +196,26 @@ memReadPrettySimplify = liftSimpTStrategy memReadPrettySimplifyApp
 asByteUpdateSequence ::
   IO.MonadIO m =>
   (forall tp'. W4.SymExpr sym tp' -> m (W4.SymExpr sym tp')) ->
-  V.Vector n (W4.SymExpr sym (W4.BaseBVType addr_w)) ->
-  W4.SymExpr sym (W4.BaseBVType w) ->
+  W4.NatRepr max_bytes {- ^ maximum number of bytes to include in a single write -} ->
+  V.Vector n (W4.SymExpr sym (W4.BaseBVType addr_w), W4.SymExpr sym (W4.BaseBVType 8)) ->
   
   W4.SymExpr sym (W4.BaseArrayType (Ctx.EmptyCtx Ctx.::> W4.BaseBVType addr_w) (W4.BaseBVType 8)) ->
-  
-  W4.SymExpr sym (W4.BaseBVType 8) ->
-  SimpT sym m (W4.SymExpr sym (W4.BaseArrayType (Ctx.EmptyCtx Ctx.::> W4.BaseBVType addr_w) (W4.BaseBVType 8)))
-asByteUpdateSequence rec acc prev_byte_base arr byte = withSym $ \sym -> do
-  W4.BaseBVRepr w <- return $ W4.exprType prev_byte_base
-  W4B.BVSelect fstBit nBits byte_base <- asApp byte
-  Refl <- simpMaybe $ testEquality byte_base prev_byte_base
 
-  Refl <- simpMaybe $ testEquality nBits (W4.knownNat @8)
-  case W4.isZeroOrGT1 fstBit of
+  SimpT sym m (W4.SymExpr sym (W4.BaseArrayType (Ctx.EmptyCtx Ctx.::> W4.BaseBVType addr_w) (W4.BaseBVType 8)))
+asByteUpdateSequence rec max_bytes acc arr = withSym $ \sym -> do
+  case W4.isZeroOrGT1 max_bytes of
     Left Refl -> 
       tryAll [True,False] $ \b -> do
-        let addr = fst (V.uncons acc)
+        let addrs = fmap fst acc
+        let bytes = fmap snd acc
+
+        val <- IO.liftIO $ concatBVs sym bytes
+        W4.BaseBVRepr w <- return $ W4.exprType val
+
+        let addr = fst (V.uncons addrs)
         addr_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType addr)
-        addr_vars <- asSequential b addr_var acc
-        val_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType byte_base)
+        addr_vars <- asSequential b addr_var addrs
+        val_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType val)
         arr_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType arr)
         W4.LeqProof <- return $ V.nonEmpty acc
         Refl <- return $ W4.minusPlusCancel (V.length acc) (W4.knownNat @1)
@@ -233,18 +233,16 @@ asByteUpdateSequence rec acc prev_byte_base arr byte = withSym $ \sym -> do
         fn <- IO.liftIO $ 
           W4.definedFn sym (W4.safeSymbol nm) (Ctx.empty Ctx.:> arr_var Ctx.:> addr_var Ctx.:> val_var) body W4.NeverUnfold
         
-        byte_base' <- lift $ rec byte_base
+        val' <- lift $ rec val
         arr' <- lift $ rec arr
         addr' <- lift $ rec addr
 
-        IO.liftIO $ W4.applySymFn sym fn (Ctx.empty Ctx.:> arr' Ctx.:> addr' Ctx.:> byte_base')
-    Right W4.LeqProof -> do
-      W4B.UpdateArray _ _ arr_prev (Ctx.Empty Ctx.:> addr_prev) val_prev <- asApp arr
-      W4B.BVSelect fstBit' _ _ <- asApp val_prev
-      -- check that we're actually grabbing the next byte
-      Refl <- simpMaybe $ testEquality (W4.addNat fstBit' (W4.knownNat @8)) fstBit
+        IO.liftIO $ W4.applySymFn sym fn (Ctx.empty Ctx.:> arr' Ctx.:> addr' Ctx.:> val')
+    Right W4.LeqProof -> asApp arr >>= \case
+      W4B.UpdateArray _ _ arr_prev (Ctx.Empty Ctx.:> addr_prev) byte_prev -> do
+        asByteUpdateSequence rec (W4.decNat max_bytes) (V.snoc acc (addr_prev, byte_prev) ) arr_prev
 
-      asByteUpdateSequence rec (V.cons addr_prev acc) byte_base arr_prev val_prev
+      _ -> asByteUpdateSequence rec (W4.knownNat @0) acc arr
 
 
 memWritePrettySimplifyApp ::
@@ -255,10 +253,15 @@ memWritePrettySimplifyApp ::
   SimpT sym m (W4.SymExpr sym tp)
 memWritePrettySimplifyApp rec app = withSym $ \_ -> do
   W4B.UpdateArray _ _ arr_prev (Ctx.Empty Ctx.:> addr_prev) byte_prev <- return app
-  W4.BaseBVRepr{} <- return $ W4.exprType addr_prev
-  W4B.BVSelect _ nBits byte_base <- asApp byte_prev
-  Refl <- simpMaybe $ testEquality nBits (W4.knownNat @8)
-  asByteUpdateSequence rec (V.singleton addr_prev) byte_base arr_prev byte_prev
+  W4.BaseBVRepr addr_w <- return $ W4.exprType addr_prev
+  W4.BaseBVRepr byte_w <- return $ W4.exprType byte_prev
+  Refl <- simpMaybe $ testEquality byte_w (W4.knownNat @8)
+
+  W4.withDivModNat addr_w (W4.knownNat @8) $ \divN modN -> do
+    Left Refl <- return $ W4.isZeroOrGT1 modN
+    Right W4.LeqProof <- return $ W4.isZeroOrGT1 divN
+    asByteUpdateSequence rec (W4.decNat divN) (V.singleton (addr_prev, byte_prev)) arr_prev
+  
 
 memWritePrettySimplify ::
   IO.MonadIO m =>
