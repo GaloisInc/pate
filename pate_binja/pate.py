@@ -1738,10 +1738,6 @@ def simplify_sexp(sexp, env=None):
             and len(arg) == 1 and isinstance(arg[0], str)):
         return f'{arg[0]}<{op[2]}:{op[3]}>'
 
-    # If op is not a string, don't try to process it.
-    if not isinstance(op, str):
-        return sexp
-
     # Simplify call(F, args...) => F(args...)
     if op == 'call' and len(arg) >= 1:
         return simplify_sexp([arg[0]] + arg[1:], env)
@@ -1755,7 +1751,7 @@ def simplify_sexp(sexp, env=None):
         return ['read1', arg[1]]
 
     # Simplify read{LE|GE}N(memory, ADDR) -> read{LE|GE}N(ADDR)
-    if re.fullmatch(r'read(?:LE|GE)\d+', op) and len(arg) == 2 and arg[0] == 'memory':
+    if isinstance(op, str) and re.fullmatch(r'read(?:LE|GE)\d+', op) and len(arg) == 2 and arg[0] == 'memory':
         return [op, arg[1]]
 
     # Simplify sbvToInteger(x) => x
