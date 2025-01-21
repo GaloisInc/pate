@@ -209,17 +209,17 @@ asByteUpdateSequence rec max_bytes acc arr = withSym $ \sym -> do
         let addrs = fmap fst acc
         let bytes = fmap snd acc
 
-        val <- IO.liftIO $ concatBVs sym bytes
-        W4.BaseBVRepr w <- return $ W4.exprType val
-
-        let addr = fst (V.uncons addrs)
+        let addr = fst (if b then V.uncons addrs else  V.unsnoc addrs  )
         addr_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType addr)
         addr_vars <- asSequential b addr_var addrs
+        W4.LeqProof <- return $ V.nonEmpty bytes
+        val <- IO.liftIO $ concatBVs sym (if b then V.reverse bytes else bytes)
+        W4.BaseBVRepr w <- return $ W4.exprType val
         val_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType val)
         arr_var <- IO.liftIO $ W4.freshBoundVar sym W4.emptySymbol (W4.exprType arr)
         W4.LeqProof <- return $ V.nonEmpty acc
         Refl <- return $ W4.minusPlusCancel (V.length acc) (W4.knownNat @1)
-        val_vars <- V.generateM (W4.decNat (V.length acc)) (\n -> do
+        val_vars <- (\x -> if b then x else V.reverse x) <$> V.generateM (W4.decNat (V.length acc)) (\n -> do
             -- TODO: should be provable
             let k = W4.natMultiply n (W4.knownNat @8)
             W4.LeqProof <- simpMaybe $ W4.testLeq (W4.addNat k (W4.knownNat @8)) w
@@ -238,9 +238,10 @@ asByteUpdateSequence rec max_bytes acc arr = withSym $ \sym -> do
         addr' <- lift $ rec addr
 
         IO.liftIO $ W4.applySymFn sym fn (Ctx.empty Ctx.:> arr' Ctx.:> addr' Ctx.:> val')
+
     Right W4.LeqProof -> asApp arr >>= \case
       W4B.UpdateArray _ _ arr_prev (Ctx.Empty Ctx.:> addr_prev) byte_prev -> do
-        asByteUpdateSequence rec (W4.decNat max_bytes) (V.snoc acc (addr_prev, byte_prev) ) arr_prev
+        asByteUpdateSequence rec (W4.decNat max_bytes) (V.cons (addr_prev, byte_prev) acc ) arr_prev
 
       _ -> asByteUpdateSequence rec (W4.knownNat @0) acc arr
 
@@ -260,7 +261,14 @@ memWritePrettySimplifyApp rec app = withSym $ \_ -> do
   W4.withDivModNat addr_w (W4.knownNat @8) $ \divN modN -> do
     Left Refl <- return $ W4.isZeroOrGT1 modN
     Right W4.LeqProof <- return $ W4.isZeroOrGT1 divN
-    asByteUpdateSequence rec (W4.decNat divN) (V.singleton (addr_prev, byte_prev)) arr_prev
+
+    (asByteUpdateSequence rec (W4.decNat divN) (V.singleton (addr_prev, byte_prev)) arr_prev
+     <|> do
+      W4.withDivModNat divN (W4.knownNat @2) $ \divN' modN' -> do
+        Left Refl <- return $ W4.isZeroOrGT1 modN'
+        Right W4.LeqProof <- return $ W4.isZeroOrGT1 divN'
+        asByteUpdateSequence rec (W4.decNat divN') (V.singleton (addr_prev, byte_prev)) arr_prev)
+
   
 
 memWritePrettySimplify ::
