@@ -450,6 +450,51 @@ class TraceWidget(QWidget):
             # Only patched
             self.traceDiff.setLinesNoDiff(patchedLines, patchedLabel)
 
+    def setTracePosVsNeg(self, posTrace: Optional[dict], negTrace: Optional[dict]):
+        if not (posTrace or negTrace):
+            # Nothing to show
+            self.traceDiff.clear('None')
+            return
+
+        self._setDomainText('NA')
+
+        pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
+
+        posLines = []
+        with io.StringIO() as out:
+            pate.pprint_event_trace(posTrace,
+                               other_et=negTrace,
+                               out=out
+                               )
+            posLines = out.getvalue().splitlines()
+
+        negLines = []
+        with io.StringIO() as out:
+            pate.pprint_event_trace(negTrace,
+                               other_et=posTrace,
+                               out=out
+                               )
+            negLines = out.getvalue().splitlines()
+
+        # Replace addr lines with binja disassembly
+        if pw:
+            posLines, negLines = pw.injectBinjaDissembly(posLines, negLines)
+
+        posLabel = 'EQUIVALENT'
+        negLabel = 'DIFFERENT'
+
+        if posTrace and negTrace:
+            # Both, show diff
+            self.traceDiff.setLinesDiff(posLines, posLabel,
+                                        negLines, negLabel)
+        elif posTrace:
+            # Only original
+            self.traceDiff.setLinesNoDiff(posLines, posLabel)
+        else:
+            # Only patched
+            self.traceDiff.setLinesNoDiff(negLines, negLabel)
+
+
     def _setDomainText(self, text):
         self.domainField.setPlainText(text)
         # Hack to make height no bigger than necessary. Tried to do this by creating a new class with
@@ -520,18 +565,31 @@ class PateCfarEqCondDialog(QDialog):
         traceConstraintButton.clicked.connect(lambda _: self.showTraceConstraintDialog())
         traceConstraintButton.setEnabled(allowTraceConstraint)
 
+        # Diff Mode Control
+        diffModeLabel = QLabel("Difference mode:")
+        self.diffModeComboBox = QComboBox()
+        self.diffModeComboBox.addItem("Original VS Patched")
+        self.diffModeComboBox.addItem("Equivalent VS Different")
+        self.diffModeComboBox.currentTextChanged.connect(self.diffModeChanged)
+        diffModeBoxLayout = QHBoxLayout()
+        diffModeBoxLayout.addWidget(diffModeLabel)
+        diffModeBoxLayout.addWidget(self.diffModeComboBox)
+        diffModeBoxLayout.addStretch()
+
         # True Trace Box
         self.trueTraceWidget = TraceWidget(self)
+        self.trueTraceLabel = QLabel("True traces:")
         trueTraceBoxLayout = QVBoxLayout()
-        trueTraceBoxLayout.addWidget(QLabel("Trace showing EQUIVALENT behaviour:"))
+        trueTraceBoxLayout.addWidget(self.trueTraceLabel)
         trueTraceBoxLayout.addWidget(self.trueTraceWidget)
         trueTraceBox = QWidget()
         trueTraceBox.setLayout(trueTraceBoxLayout)
 
         # False Trace Box
         self.falseTraceWidget = TraceWidget(self)
+        self.falseTraceLabel = QLabel("False trace:")
         falseTraceBoxLayout = QVBoxLayout()
-        falseTraceBoxLayout.addWidget(QLabel("Trace showing DIFFERENT behaviour:"))
+        falseTraceBoxLayout.addWidget(self.falseTraceLabel)
         falseTraceBoxLayout.addWidget(self.falseTraceWidget)
         falseTraceBox = QWidget()
         falseTraceBox.setLayout(falseTraceBoxLayout)
@@ -542,11 +600,18 @@ class PateCfarEqCondDialog(QDialog):
         trueFalseSplitter.addWidget(trueTraceBox)
         trueFalseSplitter.addWidget(falseTraceBox)
 
+        # Diff Box
+        diffBoxLayout = QVBoxLayout()
+        diffBoxLayout.addLayout(diffModeBoxLayout)
+        diffBoxLayout.addWidget(trueFalseSplitter)
+        diffBoxWidget = QWidget(self)
+        diffBoxWidget.setLayout(diffBoxLayout)
+
         # Main Splitter (vertical)
         mainSplitter = QSplitter()
         mainSplitter.setOrientation(Qt.Orientation.Vertical)
         mainSplitter.addWidget(eqCondBox)
-        mainSplitter.addWidget(trueFalseSplitter)
+        mainSplitter.addWidget(diffBoxWidget)
 
         # Main Layout
         main_layout = QVBoxLayout()
@@ -573,8 +638,37 @@ class PateCfarEqCondDialog(QDialog):
             else:
                 out.write('\nNo user-supplied trace constraints.\n')
             self.eqCondField.appendPlainText(out.getvalue())
-        self.trueTraceWidget.setTrace(self.conditionTrace.trace_true)
-        self.falseTraceWidget.setTrace(self.conditionTrace.trace_false)
+        if self.diffModeComboBox.currentText() == "Original VS Patched":
+            # Original VS Patch Diff Mode
+            self.trueTraceWidget.setTrace(self.conditionTrace.trace_true)
+            self.trueTraceLabel.setText('Trace showing EQUIVALENT behaviour, original vs patched:')
+            self.falseTraceWidget.setTrace(self.conditionTrace.trace_false)
+            self.falseTraceLabel.setText('Trace showing DIFFERENT behaviour, original vs patched:')
+        else:
+            # Positive VS Negative Diff Mode
+            # TODO: What about conditions in this mode? Drop?
+            # TODO: Handle case where not both true and false traces exist
+            originalPosTrace = None
+            if self.conditionTrace.trace_true:
+                originalPosTrace = self.conditionTrace.trace_true.get('traces', {}).get('original')
+            originalNegTrace = None
+            if self.conditionTrace.trace_false:
+                originalNegTrace = self.conditionTrace.trace_false.get('traces', {}).get('original')
+            patchedPosTrace = None
+            if self.conditionTrace.trace_true:
+                patchedPosTrace = self.conditionTrace.trace_true.get('traces', {}).get('patched')
+            patchedNegTrace = None
+            if self.conditionTrace.trace_false:
+                patchedNegTrace = self.conditionTrace.trace_false.get('traces', {}).get('patched')
+
+            self.trueTraceWidget.setTracePosVsNeg(originalPosTrace, originalNegTrace)
+            self.trueTraceLabel.setText('Trace showing original program, EQUIVALENT vs DIFFERENT behaviour:')
+            self.falseTraceWidget.setTracePosVsNeg(patchedPosTrace, patchedNegTrace)
+            self.falseTraceLabel.setText('Trace showing patched program, EQUIVALENT vs different behaviour:')
+
+    def diffModeChanged(self, text):
+        print('Difference mode:', self.diffModeComboBox.currentText())
+        self.updateFromCfarNode()
 
     def showTraceConstraintDialog(self):
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
