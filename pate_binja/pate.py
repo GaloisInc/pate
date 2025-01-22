@@ -906,13 +906,13 @@ class CFARNode:
         # Indicate if there are conditions traces
         conditionTraceTypes = []
         if self.equivalenceConditionTrace:
-            conditionTraceTypes.append('equivalence')
+            conditionTraceTypes.append('eq')
         if self.assertedConditionTrace:
             conditionTraceTypes.append('asserted')
         if self.assumedConditionTrace:
             conditionTraceTypes.append('assumed')
         if conditionTraceTypes:
-            out.write('Condition traces for: ')
+            out.write('Traces: ')
             out.write(', '.join(conditionTraceTypes))
 
     def pprint_node_domain(self, pre: str = '', out: IO = sys.stdout,
@@ -1733,13 +1733,35 @@ def simplify_sexp(sexp, env=None):
         return simplify_sexp_let(sexp[1], sexp[2], env)
 
     # Normal expression
-    op = sexp[0]
+    op = simplify_sexp(sexp[0], env)  # The functor can be a complex expression, not just an identifier.
     arg = list(map(lambda x: simplify_sexp(x, env), sexp[1:]))
 
     # ('_', 'extract', s, e)(n) => n<s,e>
     if (isinstance(op, list) and len(op) == 4 and op[0] == '_' and op[1] == 'extract'
             and len(arg) == 1):
-        return f'{arg[0]}<{op[2]}:{op[3]}>'
+        # Hack: Render to string to add special syntax. More general approach would be to invent a
+        # special functor that is rendered properly in simple_sexp_to_str. But for now we don't do anything with the
+        # sexp after simplify other than render it.
+        return f'{simple_sexp_to_str(arg[0])}<{op[2]}:{op[3]}>'
+
+    # ('_', 'zero_extract', n)(x) => zext(n, x)
+    if (isinstance(op, list) and len(op) == 3 and op[0] == '_' and op[1] == 'zero_extend'
+            and len(arg) == 1):
+        return ['zext', op[2]] + arg
+
+    # [20250121:JCC] Decided this was not worth it. Not really any significant improvement in readability.
+    # If this is ever re-enabled, there is also some code in simple_sexp_to_str that needs to be uncommented.
+    #
+    # # writeLE4(writeLE4(select(a, b), c , d), e, f) => writeLE4(select(a, b), [c, d], [e, f])
+    # if (op == 'writeLE4' and len(arg) == 3 and isinstance(arg[0], list)
+    #         and len(arg[0]) == 4 and arg[0][0] == 'writeLE4' and isinstance(arg[0][1], list)
+    #         and len(arg[0][1]) == 3 and arg[0][1][0] == 'select'):
+    #     return ['writeLE4*', arg[0][1], ['__list', arg[0][2], arg[0][3]], ['__list', arg[1], arg[2]]]
+    #
+    # # writeLE4(writeLE4*(select(a, b), [c, d]...), e, f) => writeLE4(select(a, b), [c, d]... [e, f])
+    # if (op == 'writeLE4' and len(arg) == 3 and isinstance(arg[0], list)
+    #         and len(arg[0]) >= 3 and arg[0][0] == 'writeLE4*'):
+    #     return ['writeLE4*', arg[0][1]] + arg[0][2:] + [['__list', arg[1], arg[2]]]
 
     # Simplify call(F, args...) => F(args...)
     if op == 'call' and len(arg) >= 1:
@@ -1879,6 +1901,9 @@ def simple_sexp_to_str(sexp, isTop: bool = False):
         result = f'{x} {infix_op_map[sexp[0]]} {y}'
         if not isTop:
             result = '(' + result + ')'
+    # [20250121:JCC] Uncomment this if we re-enable writeLE4 simplification.
+    # elif len(sexp) >= 1 and sexp[0] == '__list':
+    #     result = '[' + ', '.join(map(simple_sexp_to_str, sexp[1:])) + ']'
     else:
         result = str(sexp[0]) + "(" + ", ".join(map(simple_sexp_to_str, sexp[1:])) + ")"
 

@@ -1369,9 +1369,10 @@ class MyFlowGraphWidget(FlowGraphWidget):
 
             menu = QMenu(self)
 
-            action = QAction('Goto node in Pate', self)
-            action.triggered.connect(lambda _: self.gotoNodeInPate(cfarNode))
-            menu.addAction(action)
+            # [20250121:JCC] Ran out of time to complete this.
+            # action = QAction('Goto node in Pate', self)
+            # action.triggered.connect(lambda _: self.gotoNodeInPate(cfarNode))
+            # menu.addAction(action)
 
             if cfarNode.original_addr:
                 action = QAction(f'Goto original address {hex(cfarNode.original_addr)}', self)
