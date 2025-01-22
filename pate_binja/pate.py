@@ -1730,13 +1730,21 @@ def simplify_sexp(sexp, env=None):
         return simplify_sexp_let(sexp[1], sexp[2], env)
 
     # Normal expression
-    op = sexp[0]
+    op = simplify_sexp(sexp[0], env)  # The functor can be a complex expression, not just an identifier.
     arg = list(map(lambda x: simplify_sexp(x, env), sexp[1:]))
 
     # ('_', 'extract', s, e)(n) => n<s,e>
     if (isinstance(op, list) and len(op) == 4 and op[0] == '_' and op[1] == 'extract'
             and len(arg) == 1):
-        return f'{arg[0]}<{op[2]}:{op[3]}>'
+        # Hack: Render to string to add special syntax. More general approach would be to invent a
+        # special functor that is rendered properly in simple_sexp_to_str. But for now we don't do anything with the
+        # sexp after simplify other than render it.
+        return f'{simple_sexp_to_str(arg[0])}<{op[2]}:{op[3]}>'
+
+    # ('_', 'zero_extract', n)(x) => zext(n, x)
+    if (isinstance(op, list) and len(op) == 3 and op[0] == '_' and op[1] == 'zero_extend'
+            and len(arg) == 1):
+        return ['zext', op[2]] + arg
 
     # Simplify call(F, args...) => F(args...)
     if op == 'call' and len(arg) >= 1:
