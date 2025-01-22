@@ -618,7 +618,7 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
             cond' <- PSi.applySimpStrategy (PSi.rewriteStrategy exprBinds) cond
             let condSpec' = PS.mkSimSpec scope cond'
             let propK = getPropagationKind pg nd condK
-            let pg' = setCondition nd ConditionAsserted propK condSpec' pg
+            let pg' = setCondition nd condK propK condSpec' pg
             -- we need to schedule the ancestors here to ensure that the resulting
             -- assertion is propagated (if needed), since 'propagateOne' doesn't do this step
             return $ queueAncestors (lowerPriority pr) nd pg'
@@ -629,7 +629,7 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
           atPriority (raisePriority pr) (Just "Starting Split Analysis") $  do
             pg2 <- propagateOne scope bundle [ConditionAssumed, ConditionEquiv] nd nd_single ConditionAsserted pg >>= \case
               (ConditionNotPropagated, pg1) -> return pg1
-              (ConditionPropagated preconds, pg1) -> foldM (\pg_ condK -> rewrite_cond condK binds pg_) pg1 preconds 
+              (ConditionPropagated preconds, pg1) -> foldM (\pg_ condK -> rewrite_cond condK binds pg_) pg1 (ConditionAsserted:preconds) 
               (ConditionInfeasible, pg1) -> rewrite_cond ConditionAsserted binds pg1
 
             withAssumptionSet (PAS.fromExprBindings binds) $ withGraphNode' scope nd bundle dom pg2 $ do
