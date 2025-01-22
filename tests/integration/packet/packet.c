@@ -19,6 +19,7 @@ int parse_data(void* buffer, uint8_t size, FILE *stream) {
 
 #define PROTO_SYNC 0x0564
 #define LINK_ACK 0x80
+#define PADDING asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");
 
 typedef struct {
   // link layer
@@ -62,20 +63,20 @@ int parse_packet(uint16_t host, uint16_t remote, FILE *stream) {
 
   // transport layer
   fread(&IncomingPacket.transportControl, 1, 1, stream);
-
   // application_layer
-#ifdef PATCHED
-  int size = IncomingPacket.length;
+  uint8_t size = IncomingPacket.length;
+  
   if (IncomingPacket.linkControl == LINK_ACK) {
+    #ifdef PATCHED
     size = 0;
+    #else
+    asm("nop");
+    asm("nop");
+    #endif
   }
+
   printf("[INFO] Reading %d bytes\n", size);
   return parse_data(&IncomingPacket.applicationData, size, stream);
-#else
-  printf("[INFO] Reading %d bytes\n", IncomingPacket.length);
-  return parse_data(&IncomingPacket.applicationData, IncomingPacket.length, stream);
-#endif
-
 }
 
 int main(int argc, char **argv) {
