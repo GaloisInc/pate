@@ -53,7 +53,7 @@ expect "Waiting for constraints.."
 # error about a missing identifier. The target expression should be the one that ends in 
 # something like: 'select v35113 (bvSum cr5O_offset@34733:bv 0x2:[32]))'
 
-send "input \"\[ \[ { \\\"var\\\" : { \\\"symbolic_ident\\\" : 16893 }, \\\"op\\\" : \\\"EQ\\\", \\\"const\\\" : \\\"128\\\"} \] \]\"\r"
+send "input \"\[ \[ { \\\"var\\\" : { \\\"symbolic_ident\\\" : 17460 }, \\\"op\\\" : \\\"EQ\\\", \\\"const\\\" : \\\"128\\\"} \] \]\"\r"
 
 expect "Regenerate result with new trace constraints?"
 expect "1: False"

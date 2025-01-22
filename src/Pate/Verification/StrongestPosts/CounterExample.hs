@@ -35,6 +35,8 @@ module Pate.Verification.StrongestPosts.CounterExample
 
 import           Data.Text (Text)
 import           Numeric (showHex)
+import qualified Data.Set as Set
+
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
@@ -265,14 +267,14 @@ instance (PSo.ValidSym sym, PA.ValidArch arch) => IsTraceNode '(sym,arch) "trace
 
 mkFootprint ::
   forall sym arch.
-  W4.IsExprBuilder sym =>
+  W4.IsSymExprBuilder sym =>
   sym ->
   MT.RegOp sym arch ->
   SymSequence sym (MT.TraceEvent sym arch) -> 
   IO (TraceFootprint sym arch)
 mkFootprint sym init_regs s = do
   init_mems <- W4.concatSymSequence sym go (\_ a b -> return $ a ++ b) (\a b -> return $ a ++ b) [] s
-  return $ TraceFootprint init_regs init_mems
+  return $ TraceFootprint init_regs (Set.toList (Set.fromList init_mems))
   where
     go :: MT.TraceEvent sym arch -> IO [(MM.ArchSegmentOff arch, (MT.MemOp sym (MM.ArchAddrWidth arch)))]
     go = \case
