@@ -1746,6 +1746,20 @@ def simplify_sexp(sexp, env=None):
             and len(arg) == 1):
         return ['zext', op[2]] + arg
 
+    # [20250121:JCC] Decided this was not worth it. Not really any significant improvement in readability.
+    # If this is ever re-enabled, there is also some code in simple_sexp_to_str that needs to be uncommented.
+    #
+    # # writeLE4(writeLE4(select(a, b), c , d), e, f) => writeLE4(select(a, b), [c, d], [e, f])
+    # if (op == 'writeLE4' and len(arg) == 3 and isinstance(arg[0], list)
+    #         and len(arg[0]) == 4 and arg[0][0] == 'writeLE4' and isinstance(arg[0][1], list)
+    #         and len(arg[0][1]) == 3 and arg[0][1][0] == 'select'):
+    #     return ['writeLE4*', arg[0][1], ['__list', arg[0][2], arg[0][3]], ['__list', arg[1], arg[2]]]
+    #
+    # # writeLE4(writeLE4*(select(a, b), [c, d]...), e, f) => writeLE4(select(a, b), [c, d]... [e, f])
+    # if (op == 'writeLE4' and len(arg) == 3 and isinstance(arg[0], list)
+    #         and len(arg[0]) >= 3 and arg[0][0] == 'writeLE4*'):
+    #     return ['writeLE4*', arg[0][1]] + arg[0][2:] + [['__list', arg[1], arg[2]]]
+
     # Simplify call(F, args...) => F(args...)
     if op == 'call' and len(arg) >= 1:
         return simplify_sexp([arg[0]] + arg[1:], env)
@@ -1884,6 +1898,9 @@ def simple_sexp_to_str(sexp, isTop: bool = False):
         result = f'{x} {infix_op_map[sexp[0]]} {y}'
         if not isTop:
             result = '(' + result + ')'
+    # [20250121:JCC] Uncomment this if we re-enable writeLE4 simplification.
+    # elif len(sexp) >= 1 and sexp[0] == '__list':
+    #     result = '[' + ', '.join(map(simple_sexp_to_str, sexp[1:])) + ']'
     else:
         result = str(sexp[0]) + "(" + ", ".join(map(simple_sexp_to_str, sexp[1:])) + ")"
 
