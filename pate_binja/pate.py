@@ -903,13 +903,13 @@ class CFARNode:
         # Indicate if there are conditions traces
         conditionTraceTypes = []
         if self.equivalenceConditionTrace:
-            conditionTraceTypes.append('equivalence')
+            conditionTraceTypes.append('eq')
         if self.assertedConditionTrace:
             conditionTraceTypes.append('asserted')
         if self.assumedConditionTrace:
             conditionTraceTypes.append('assumed')
         if conditionTraceTypes:
-            out.write('Condition traces for: ')
+            out.write('Traces: ')
             out.write(', '.join(conditionTraceTypes))
 
     def pprint_node_domain(self, pre: str = '', out: IO = sys.stdout,
