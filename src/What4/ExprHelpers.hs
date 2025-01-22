@@ -1068,6 +1068,42 @@ resolveConcreteLookups sym check e_outer = do
                 Just Nothing -> resolveArr arr' idx
                 -- inconclusive result, give up
                 Nothing -> return Nothing
+          W4B.BaseIte _ _ cond eT eF -> do
+            check cond >>= \case
+              Just True -> resolveArr eT idx
+              Just False -> resolveArr eF idx
+              Nothing -> do
+                cond' <- go cond
+                mvalT <- resolveArr eT idx >>= \case
+                  Just valT -> Just <$> go valT
+                  Nothing -> return Nothing
+                mvalF <- resolveArr eF idx >>= \case
+                  Just valF -> Just <$> go valF
+                  Nothing -> return Nothing
+                case (mvalT, mvalF) of
+                  (Just valT, Just valF) -> do
+                    Just <$> (liftIO $ W4.baseTypeIte sym cond' valT valF)
+                  (Just valT, Nothing) -> do
+                    eF' <- go eF
+                    idx' <- TFC.traverseFC go idx
+                    valF <- liftIO $ W4.arrayLookup sym eF' idx'
+                    Just <$> (liftIO $ W4.baseTypeIte sym cond' valT valF)
+                  (Nothing, Just valF) -> do
+                    eT' <- go eT
+                    idx' <- TFC.traverseFC go idx
+                    valT <- liftIO $ W4.arrayLookup sym eT' idx'
+                    Just <$> (liftIO $ W4.baseTypeIte sym cond' valT valF)
+                  (Nothing, Nothing) -> do
+                    eF' <- go eF
+                    eT' <- go eT
+                    case cond == cond' && eT == eT' && eF == eF' of
+                      True -> return Nothing
+                      False -> do
+                        idx' <- TFC.traverseFC go idx
+                        valT <- liftIO $ W4.arrayLookup sym eT' idx'
+                        valF <- liftIO $ W4.arrayLookup sym eF' idx'
+                        Just <$> (liftIO $ W4.baseTypeIte sym cond' valT valF)
+
           _ -> return Nothing
         _ -> return Nothing
 

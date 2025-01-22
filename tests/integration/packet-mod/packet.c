@@ -1,13 +1,44 @@
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
+#include "stdlib.h"
 
 int check_crc(uint16_t crc, void *data) { return (crc == 0); }
 
-int parse_data(void* buffer, uint8_t size, FILE *stream) {
-  fread(buffer, size, 1, stream);
+#define LOG_READ_SIZE 0
+#define LOG_READ_RESULT 1
+#define LOG_MAX_SIZE 2
+
+
+#pragma noinline
+void log_info(int log_msg, uint8_t value) {
+  switch (log_msg) {
+    case LOG_MAX_SIZE:
+      print("[INFO] Max packet size: ");
+      break;
+    case LOG_READ_SIZE:
+      print("[INFO] Reading bytes: ");
+      break;
+    case LOG_READ_RESULT:
+      print("[INFO] Reading result: ");
+      break;
+    default:
+      print("[UNKNOWN]: ");
+  }
+  printf("%d\n", value);
+}
+
+#pragma noinline
+int parse_data(void* buffer, uint8_t* size, FILE *stream) {
+  int result_len = fread(buffer, *size, 1, stream);
+  log_info(LOG_READ_RESULT, result_len);
   return EXIT_SUCCESS;
 }
+
+#pragma noinline
+void noop(void* val) {
+  return;
+}
+
 
 #define DATA_MAX 64
 
@@ -19,7 +50,6 @@ int parse_data(void* buffer, uint8_t size, FILE *stream) {
 
 #define PROTO_SYNC 0x0564
 #define LINK_ACK 0x80
-#define PADDING asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");asm("nop");
 
 typedef struct {
   // link layer
@@ -36,8 +66,17 @@ typedef struct {
 } Packet;
 
 Packet IncomingPacket;
+int parse_packet(uint16_t host, uint16_t remote, FILE *stream);
 
+int main(int argc, char **argv) {
+  log_info(LOG_MAX_SIZE, sizeof(Packet));
+  parse_packet(0, 1, NULL);
+}
+
+#pragma noinline
 int parse_packet(uint16_t host, uint16_t remote, FILE *stream) {
+  
+
   // link layer
   fread(&IncomingPacket.sync, 2, 1, stream);
   if (IncomingPacket.sync != PROTO_SYNC) {
@@ -63,23 +102,35 @@ int parse_packet(uint16_t host, uint16_t remote, FILE *stream) {
 
   // transport layer
   fread(&IncomingPacket.transportControl, 1, 1, stream);
+
   // application_layer
   uint8_t size = IncomingPacket.length;
-  
-  if (IncomingPacket.linkControl == LINK_ACK) {
-    #ifdef PATCHED
+  void* buffer = &IncomingPacket.applicationData;
+  uint8_t ctrl = IncomingPacket.linkControl;
+
+#ifdef BADPATCH
+  if (ctrl == LINK_ACK) {
     size = 0;
-    #else
-    asm("nop");
-    asm("nop");
-    #endif
   }
+  log_info(LOG_READ_SIZE, size);
+  return parse_data(buffer, size,
+                    stream); // passes size int
+#elif GOODPATCH
+  if (ctrl == LINK_ACK) {
+    size = 0;
+  }
+  log_info(LOG_READ_SIZE, size);
+  return parse_data(buffer, &size,
+                    stream); // passes size ptr
+#else
+  asm("nop");
+  asm("nop");
+  asm("nop");
+  asm("nop");
+  asm("nop");
+  log_info(LOG_READ_SIZE, size);
+  return parse_data(buffer, &size,
+                    stream);
+#endif
 
-  printf("[INFO] Reading %d bytes\n", size);
-  return parse_data(&IncomingPacket.applicationData, size, stream);
-}
-
-int main(int argc, char **argv) {
-  printf("[INFO] Max packet size: %d\n", sizeof(Packet));
-  parse_packet(0, 1, NULL);
 }

@@ -127,6 +127,7 @@ import qualified Data.Parameterized.TraversableF as TF
 import Data.Maybe
 import Pate.Memory
 import qualified Pate.ExprMappable as PEM
+import Control.Monad (forM)
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -457,23 +458,29 @@ mkObservableOverride ::
   16 <= MC.ArchAddrWidth arch =>
   MS.SymArchConstraints arch =>
   T.Text {- ^ name of call -} ->
-  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r0 -} ->
-  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ r1 -} ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return -} ->
+  [MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch))] {- ^ args -} ->
   StubOverride arch
-mkObservableOverride nm r0_reg r1_reg = StubOverride $ \sym _archInfo _wsolver -> do
+mkObservableOverride nm return_reg arg_regs = StubOverride $ \sym _archInfo _wsolver -> do
   let w_mem = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
-  let bv_repr = W4.BaseBVRepr w_mem
   -- FIXME: this is wrong, since this value needs to read from memory
-  bv_fn <- W4U.mkUninterpretedSymFn sym ("written_" ++ show nm) (Ctx.empty Ctx.:> bv_repr) (W4.BaseBVRepr w_mem)
+  
   return $ StateTransformer $ \st -> do
-    let (CLM.LLVMPointer _ r1_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r1_reg
+    args <- forM arg_regs $ \r -> do
+      let (CLM.LLVMPointer _reg r_val) = PSR.macawRegValue $ (PS.simRegs st) ^. MC.boundValue r
+      return $ r_val
+
+    Some argsCtx <- return $ Ctx.fromList (map Some args)
+    let reprsCtx = TFC.fmapFC W4.exprType argsCtx
+    bv_fn <- W4U.mkUninterpretedSymFn sym ("written_" ++ show nm) reprsCtx (W4.BaseBVRepr w_mem)
+
     let mem = PS.simMem st
-    mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> r1_val) mem
+    mem' <- PMT.addExternalCallEvent sym nm argsCtx mem
     let st' = st { PS.simMem = mem' }
     zero_nat <- W4.natLit sym 0
-    fresh_bv <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> r1_val) 
+    fresh_bv <- W4.applySymFn sym bv_fn argsCtx
     let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
-    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue r0_reg) .~ ptr ) })
+    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue return_reg) .~ ptr ) })
 
 mkEventOverride ::
   forall arch ptrW.

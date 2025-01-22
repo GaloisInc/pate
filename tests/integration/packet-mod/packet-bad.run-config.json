@@ -1,6 +1,6 @@
 {
   "original": "packet.original.exe",
-  "patched": "packet.patched.exe",
+  "patched": "packet.patched-bad.exe",
   "args": [
     "-s parse_packet"
   ]

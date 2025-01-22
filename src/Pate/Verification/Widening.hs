@@ -36,12 +36,13 @@ module Pate.Verification.Widening
   , getTraceFootprint
   , propagateCondition
   , propagateOne
+  , getEquivPostCondition
   , PropagateCase(..)
   ) where
 
 import           GHC.Stack
 import           Control.Lens ( (.~), (&), (^.), (%~) )
-import           Control.Monad (when, forM_, unless, filterM, foldM, void)
+import           Control.Monad (when, forM_, unless, filterM, foldM, void, forM)
 import           Control.Monad.IO.Class
 import qualified Control.Monad.IO.Unlift as IO
 import           Control.Monad.Writer (tell, execWriterT)
@@ -54,8 +55,8 @@ import           Prettyprinter
 import qualified Data.BitVector.Sized as BVS
 import qualified Data.Set as Set
 import qualified Data.Map as Map
-import           Data.List (foldl', (\\))
-import           Data.Maybe (mapMaybe)
+import           Data.List (foldl', (\\), nub)
+import           Data.Maybe (mapMaybe, catMaybes)
 import           Data.Parameterized.Classes()
 import           Data.Parameterized.NatRepr
 import           Data.Parameterized.Some
@@ -910,7 +911,7 @@ propagateBindings scope bundle from to gr0 = withSym $ \sym -> case (asSingleNod
 data PropagateCase = 
     ConditionInfeasible -- ^ condition cannot be satisfied
   | ConditionNotPropagated
-  | ConditionPropagated
+  | ConditionPropagated [ConditionKind] -- ^ condition was propagated, along with preconditions
   deriving (Eq, Ord, Show)
 
 -- | True if the given 'PropagateCase' indicates that the 'PairGraph' was left unmodified.
@@ -918,7 +919,8 @@ propagateCaseNoop :: PropagateCase -> Bool
 propagateCaseNoop = \case
   ConditionInfeasible -> False
   ConditionNotPropagated -> True
-  ConditionPropagated -> False
+  ConditionPropagated{} -> False
+
 
 -- | Propagate the given condition kind backwards (from 'to' node to 'from' node).
 --   Does not do any other graph maintenance (i.e. dropping stale domains or re-queuing nodes).
@@ -928,24 +930,29 @@ propagateOne ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
+  [ConditionKind] -> {- ^ weaken the propagated condition with assumptions -}
   GraphNode arch {- ^ from -} ->
   GraphNode arch {- ^ to -} ->
   ConditionKind ->
   PairGraph sym arch ->
   EquivM sym arch (PropagateCase, PairGraph sym arch)
-propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
+propagateOne scope bundle preconds from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
   Nothing -> do
     emitTrace @"debug" "No condition to propagate"
     return (ConditionNotPropagated, gr0)
   Just{} -> do
     -- take the condition of the target edge and bind it to
     -- the output state of the bundle
+    -- weaken the result with any given preconditions
     cond_ <- getEquivPostCondition scope bundle to condK gr0
+
+
     simplifier <- PSi.mkSimplifier PSi.deepPredicateSimplifier
     cond <- PSi.applySimplifier simplifier cond_
         -- check if the "to" condition is already satisifed, otherwise
         -- we need to update our own condition
     cond_pred <- PEC.toPred sym cond
+
     goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
     isPredSat' goalTimeout cond_pred >>= \case
       Just False -> do
@@ -965,10 +972,39 @@ propagateOne scope bundle from to condK gr0 = withSym $ \sym -> case getConditio
             return (ConditionNotPropagated, gr0)
           -- we need more assumptions for this condition to hold
           Just True -> do
-            emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
-            let propK = getPropagationKind gr0 to condK
-            gr1 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr0
-            return $ (ConditionPropagated, markEdge from to gr1)
+            let go precondK = do
+                  precond_ <- getEquivPostCondition scope bundle to precondK gr0
+                  precond <- PSi.applySimplifier simplifier precond_
+                  precondPred <- PEC.toPred sym precond
+                  return (precondK, precond, precondPred)
+            res <- mapM go preconds
+            asms <- IO.liftIO $ foldM (\p (_,_,precondPred) -> W4.andPred sym p precondPred) (W4.truePred sym) res
+            -- if we have any preconditions, check if this is provable with them, and
+            -- propagate those conditions as well
+            (used_preconds, gr1) <- case W4.asConstantPred asms of
+              Just True -> return (Just [], gr0)
+              _ -> (withAssumption asms $ isPredSat' goalTimeout not_cond) >>= \case
+                Just False -> do
+                  emitTraceLabel @"expr" (ExprLabel $ "Proven (with assumptions) " ++ conditionName condK) (Some cond_pred) 
+                  return (Nothing, gr0)
+                Just True -> do
+                  withTracing @"message" "Propagating Assumptions" $ do
+                    (used_preconds',gr1) <- withPG gr0 $ forM res $ \(precondK, precond, precondPred) -> do
+                      case W4.asConstantPred precondPred of
+                        Just True -> return Nothing
+                        _ -> do
+                          let propK = getPropagationKind gr0 to precondK
+                          liftEqM_ $ updateEquivCondition scope from precondK (Just (nextPropagate propK)) precond
+                          return $ Just precondK
+                    return (Just (catMaybes used_preconds'), gr1)
+                Nothing -> throwHere $ PEE.InconclusiveSAT
+            case used_preconds of
+              Nothing -> return (ConditionNotPropagated, gr1)
+              Just used_preconds' -> do
+                emitTraceLabel @"expr" (ExprLabel $ "Propagated  " ++ conditionName condK) (Some cond_pred)
+                let propK = getPropagationKind gr1 to condK
+                gr2 <- updateEquivCondition scope from condK (Just (nextPropagate propK)) cond gr1
+                return $ (ConditionPropagated used_preconds', markEdge from to gr2)
           Nothing -> throwHere $ PEE.InconclusiveSAT
 
 
@@ -986,8 +1022,9 @@ propagateCondition ::
   EquivM sym arch (PropagateCase, PairGraph sym arch)
 propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
   priority <- thisPriority
-  (pcase, gr1) <- withPG gr0 $ do
-    pcases <- mapM go [minBound..maxBound]
+  (pcases, gr1) <- go [] [ConditionAssumed, ConditionEquiv, ConditionAsserted] gr0
+  let used = nub $ foldr (\pc used_ -> case pc of ConditionPropagated used' -> used_ ++ used'; _ -> used) [] pcases
+  (pcase, gr2) <- withPG gr1 $ do
     let anyInfeasible = any ((==) ConditionInfeasible) pcases
     case anyInfeasible of
       True -> return ConditionInfeasible
@@ -995,7 +1032,7 @@ propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
         True -> do
           liftPG $ modify $ \gr_ -> 
             queueAncestors (priority PriorityPropagation) from (markEdge from to gr_)
-          return $ ConditionPropagated
+          return $ ConditionPropagated used
         False -> case all propagateCaseNoop pcases of
           True -> return ConditionNotPropagated
           False -> do
@@ -1003,7 +1040,8 @@ propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
               queueAncestors (priority PriorityPropagation) from $ 
               queueNode (priority PriorityNodeRecheck) from $ 
               dropPostDomains from (priority PriorityDomainRefresh) (markEdge from to gr_)
-            return ConditionPropagated
+            
+            return $ ConditionPropagated used
 
   -- When transitioning between single and two-sided analyses, we
   -- want to avoid propagating conditions implicitly during widening.
@@ -1011,16 +1049,33 @@ propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
   -- manages all of the needed bookkeeping surrounding matching up variables
   -- from both sides of the analysis.
   case (isSingleNode from, isSingleNode to) of
-        (Just{}, Just{}) -> return $ (pcase, gr1)
-        (Nothing, Nothing) -> return $ (pcase, gr1)
+        (Just{}, Just{}) -> return $ (pcase, gr2)
+        (Nothing, Nothing) -> return $ (pcase, gr2)
         -- special case, where we want to retain the fact that one of the
         -- conditions is infeasible but we don't want to do any graph maintenance
         _ | pcase == ConditionInfeasible -> return $ (ConditionInfeasible, gr0)
         _ -> return (ConditionNotPropagated, gr0)
 
   where
-    go condK = liftEqM (propagateOne scope bundle from to condK)
-
+    go _ [] gr = return ([],gr)
+    go preconds (condK:conds) gr =  do
+      (pcase, gr') <- propagateOne scope bundle preconds from to condK gr
+      case pcase of
+        -- we need to collect any non-propagated conditions so that
+        -- propagated conditions are weakened with them
+        -- i.e. we need to retain the fact that asserted conditions need
+        -- only be provable under the assumed conditions
+        ConditionNotPropagated -> do
+          (pcases, gr'') <- go (condK:preconds) conds gr'
+          return (pcase:pcases, gr'')
+        -- give up early if any conditions are infeasible, since 
+        -- we'll necessarily be assuming/asserting that this branch is
+        -- unreachable
+        ConditionInfeasible -> return ([pcase], gr')
+        -- for propagated conditions we don't need any weakening
+        ConditionPropagated{} -> do
+          (pcases, gr'') <- go preconds conds gr'
+          return (ConditionPropagated [condK]:pcases, gr'')
 
 -- | Given the results of symbolic execution, and an edge in the pair graph
 --   to consider, compute an updated abstract domain for the target node,
@@ -1058,7 +1113,7 @@ widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
   gr1 <- addRefinementChoice to gr0
   priority <- thisPriority
   propagateCondition scope bundle from to gr1 >>= \case
-    (ConditionPropagated, gr2) -> do
+    (ConditionPropagated{}, gr2) -> do
       -- since this 'to' edge has propagated backwards
       -- an equivalence condition, we need to restart the analysis
       -- for 'from'

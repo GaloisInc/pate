@@ -175,6 +175,7 @@ library
                        What4.SymSequence,
                        What4.Simplify,
                        What4.Simplify.Bitvector,
+                       What4.Simplify.Array,
                        Data.Parameterized.SetF,
                        Data.Parameterized.SetCtx,
                        Data.Parameterized.PairF,
