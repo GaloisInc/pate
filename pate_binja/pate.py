@@ -1,4 +1,7 @@
-# Copyright 2023-2024, Galois Inc. All rights reserved.
+# Copyright 2023-2025, Galois Inc. All rights reserved.
+#
+# Wrapper for the PATE verifier. Handles startup, shutdown and I/O with the PATE Verifier. This code is independent of
+# the GUI and can be run standalone in tty mode.
 
 from __future__ import annotations
 import abc

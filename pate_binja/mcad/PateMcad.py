@@ -1,3 +1,7 @@
+# Copyright 2023-2025, Galois Inc. All rights reserved.
+#
+# Python code wrapping the MCAD GRPC communications.
+
 from __future__ import annotations
 
 import os

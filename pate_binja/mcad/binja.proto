@@ -1,3 +1,5 @@
+// GRPC proto specification for communications between MCAD and the PATE Verifier Binary Ninja Plugin
+
 syntax = "proto3";
 
 service Binja {

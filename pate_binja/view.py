@@ -1,4 +1,6 @@
-# Copyright 2023-2024, Galois Inc. All rights reserved.
+# Copyright 2023-2025, Galois Inc. All rights reserved.
+#
+# The GUI code for the PATE Verifier Binary Ninja Plugin.
 
 from __future__ import annotations
 import io

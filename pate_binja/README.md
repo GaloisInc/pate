@@ -1,4 +1,4 @@
-# PATE Verifier Plugin for Binary Ninja
+# PATE Verifier Binary Ninja Plugin
 
 This is an early release of the PATE plugin for Binary Ninja (Binja). At this time, there is no interface to specify PATE run parameters. You must create a run configuration file in json format. For example:
 ```json
@@ -44,23 +44,11 @@ export PATE_BINJA_MODE=BUILD
 Once Binary Ninja is running, you can run PATE from the "Plugins" menu. An open file dialog will open. By defualt it will be looking for a PATE Run Configuration file (*.run-config.json). If you want to run a replay file, select "PATE Replay (*.json)" in the file type drop down menu.
 
 
-## Developer Notes (macOS with PyCharm)
+## MCAD Intigration
 
-To run demos in tty mode, you need to define an environment variable to point at the clone of the [PATE Binja Demos repo](https://gitlab-ext.galois.com/pate/pate-binja-demos):
-```bash
-export PATE_BINJA_DEMOS=<demos dir>
-```
+MCAD provides timing analysis for instruction traces. To enable this integration you need to do two things:
 
-To install the Binja api for completion in PyCharm:
+1. Install the MCAD docker image. See the Docker section here:
+   https://github.com/securesystemslab/LLVM-MCA-Daemon?tab=readme-ov-file#docker. Use the `broker-improvements` branch.
+2. In the Binary Ninja UI, got to Preferences. In the PATE section set name the MCAD docker image.
 
-- Setup project with venv (Python 3.11 or newer)
-- Go to python console (runs within venv)
-- python /Applications/Binary\ Ninja.app/Contents/Resources/scripts/install_api.py 
-
-To set up debugging under Binary Ninja (requires PyCharm Pro):
-
-- See https://docs.binary.ninja/dev/plugins.html#remote-debugging-with-intellij-pycharm
-- In Binja settings specify python interpreter and site package dir to point at your Pycharm project venv installs.
-- Create the run config. Note "pip install ..." command line for next step. Pick a port.
-- In Pycharm python console (venv) execute the "pip install ..." command.
-- May also need/want to set python interpreter and site packages in Binary Ninja settings to the venv for the pyCharm project.
