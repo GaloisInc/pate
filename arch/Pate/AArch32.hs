@@ -348,8 +348,8 @@ stubOverrides =
     r4 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")
 
     v0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V0")
-    v1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V1")
-    v2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V2")
+    --v1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V1")
+    --v2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V2")
     --r3 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
 
 instance MCS.HasArchTermEndCase MAA.ARMTermStmt where
