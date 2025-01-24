@@ -12,7 +12,6 @@ import qualified Data.IORef as IO
 import           Data.Proxy
 import qualified Data.Set as Set
 import qualified Test.Tasty as TT
-import qualified Test.Tasty.ExpectedFailure as TT
 import qualified Test.Tasty.HUnit as TTH
 
 import           Data.Parameterized.Some
@@ -27,7 +26,7 @@ import qualified Pate.Solver as PS
 import qualified Pate.AssumptionSet as PAs
 import qualified What4.Interface as W4
 import qualified What4.Solver as W4
-import qualified Pate.Timeout as PT
+--import qualified Pate.Timeout as PT
 import qualified Pate.Arch as PA
 import           Pate.TraceTree
 import qualified Data.Map as Map
