@@ -29,13 +29,11 @@ import qualified Control.Lens as L
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
-import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import           Data.Void ( Void, absurd )
 import qualified What4.Interface as WI
-import qualified Data.Map as Map
 import qualified Data.Macaw.AbsDomain.AbsState as MA
 import qualified Data.Macaw.CFG as MC
 import qualified Data.Macaw.CFGSlice as MCS
@@ -68,7 +66,6 @@ import qualified Pate.Verification.Domain as PD
 import Data.List (nub)
 import Pate.Config
 import qualified Data.Parameterized.Map as MapF
-import qualified Pate.Address as PA
 import Data.Macaw.ARM.Identify (conditionalCallClassifier, conditionalReturnClassifier, wrapClassifierForPstateT)
 import Control.Applicative
 import qualified Data.Macaw.Discovery as MD
@@ -351,8 +348,8 @@ stubOverrides =
     r4 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R4")
 
     v0 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V0")
-    v1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V1")
-    v2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V2")
+    --v1 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V1")
+    --v2 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_V2")
     --r3 = ARMReg.ARMGlobalBV (ASL.knownGlobalRef @"_R3")
 
 instance MCS.HasArchTermEndCase MAA.ARMTermStmt where

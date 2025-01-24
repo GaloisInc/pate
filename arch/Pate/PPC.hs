@@ -32,13 +32,11 @@ import qualified Control.Lens as L
 import           Control.Applicative ( (<|>), Const (..) )
 import qualified Control.Monad.Catch as CMC
 import qualified Data.BitVector.Sized as BVS
-import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ElfEdit.Prim as EEP
 import qualified Data.Parameterized.Classes as PC
 import qualified Data.Parameterized.NatRepr as PN
 import           Data.Parameterized.Some ( Some(..) )
 import qualified Data.Text as T
-import qualified Data.Map as Map
 import           Data.Void ( Void, absurd )
 import           Data.Word ( Word8 )
 import           GHC.Stack ( HasCallStack )
@@ -82,13 +80,9 @@ import qualified Pate.Verification.Override as PVO
 import qualified Pate.Verification.Domain as PD
 
 import           Pate.TraceTree
-import Data.Macaw.CFG.Core
 import qualified What4.JSON as W4S
 import qualified Data.Macaw.CFG as MC
 import qualified Pate.SimState as PS
-import qualified Data.Parameterized.Map as MapF
-import qualified Data.Macaw.AbsDomain.AbsState as MA
-import qualified Data.Set as Set
 import qualified Pate.Memory.MemTrace as PMT
 import Data.Data (Typeable)
 
