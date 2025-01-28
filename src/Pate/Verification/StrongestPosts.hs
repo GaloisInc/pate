@@ -2118,8 +2118,9 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
          liftIO $ W4.bvEq sym x y
        _ -> return (W4.falsePred sym)
 
-  eqEvent (MT.ExternalCallEvent nmx x) (MT.ExternalCallEvent nmy y)
+  eqEvent (MT.ExternalCallEventGen nmx x obsx) (MT.ExternalCallEventGen nmy y obsy)
     | nmx == nmy
+    , obsx == obsy
     = IO.liftIO $  do
       ps <- mapM (\(x_,y_) -> ET.compareExternalCallData sym x_ y_) (zip x y)
       foldM (W4.andPred sym) (W4.truePred sym) ps

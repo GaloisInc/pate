@@ -475,7 +475,7 @@ mkObservableOverride nm return_reg arg_regs = StubOverride $ \sym _archInfo _wso
     bv_fn <- W4U.mkUninterpretedSymFn sym ("written_" ++ show nm) reprsCtx (W4.BaseBVRepr w_mem)
 
     let mem = PS.simMem st
-    mem' <- PMT.addExternalCallEvent sym nm argsCtx mem
+    mem' <- PMT.addExternalCallEvent sym nm argsCtx True mem 
     let st' = st { PS.simMem = mem' }
     zero_nat <- W4.natLit sym 0
     fresh_bv <- W4.applySymFn sym bv_fn argsCtx
@@ -507,7 +507,7 @@ mkEventOverride nm readChunk len buf_reg rOut = StubOverride $ \(sym :: sym) _ar
   len_sym <- W4.bvLit sym ptrW (BVS.mkBV ptrW (fromIntegral len))
   bytes_chunk <- PMT.readChunk sym (PMT.memState mem) buf_ptr len_sym
   written <- readChunk sym bytes_chunk
-  mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> written) mem
+  mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> written) True mem
   result <- PSR.bvToEntry sym written 
   return (st' { PS.simMem = mem', PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ result ) })
 
@@ -770,7 +770,7 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym archInfo wsolv
         -- endianness doesn't really matter, as long as we're consistent
         let memrepr = MC.BVMemRepr w (MI.archEndianness archInfo)
         (CLM.LLVMPointer region val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
-        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv Ctx.:> W4.natToIntegerPure region) mem
+        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv Ctx.:> W4.natToIntegerPure region) True mem
         -- globally-unique
         bv_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "sz") (Ctx.empty Ctx.:> (W4.exprType val_bv)) (W4.BaseBVRepr w_mem)
         sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> val_bv)
@@ -835,6 +835,7 @@ mkArgPassthroughOverride rArg rOut = StubOverride $ \_ _ _ -> return $ StateTran
 mkDefaultStubOverrideArg ::
   forall arch.
   MS.SymArchConstraints arch =>
+  ValidArch arch =>
   String ->
   [Some (MC.ArchReg arch)] {- ^ argument registers -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
@@ -843,14 +844,25 @@ mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
 
   return $ StateTransformer $ \st -> do
-    zero_nat <- W4.natLit sym 0
     vals <- mapM (\(Some r) -> getType sym (PS.simRegs st ^. MC.boundValue r)) rArgs
     Some vals_ctx <- return $ Ctx.fromList vals
     -- globally unique function
     result_fn <- W4U.mkUninterpretedSymFn sym nm (TFC.fmapFC W4.exprType vals_ctx) (W4.BaseBVRepr w)
     fresh_bv <- W4.applySymFn sym result_fn vals_ctx
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
-    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+    let mem0 = PS.simMem st
+    -- add unobservable event, so this call appears in the trace
+    mem1 <- case fromRegisterDisplay (displayRegister rOut) of
+      Just rOutNm -> do
+        -- TODO: this is a quick solution to indicate where the result of
+        -- the call was saved. Ideally there would be a formal slot in the
+        -- event to store this information.
+        let nm' = rOutNm ++ " <- " ++ nm
+        IO.liftIO $ PMT.addExternalCallEvent sym (T.pack nm') vals_ctx False mem0
+      Nothing -> IO.liftIO $ PMT.addExternalCallEvent sym (T.pack nm) vals_ctx False mem0
+    ptr <- IO.liftIO $ PSR.bvToEntry sym fresh_bv
+    -- add a register event to mark the register update
+    mem2 <- IO.liftIO $ PMT.addRegEvent sym (PMT.RegOp $ MapF.singleton rOut ptr) mem1
+    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr), PS.simMem = mem2 })
   where
     getType :: 
       W4.IsExprBuilder sym => 
