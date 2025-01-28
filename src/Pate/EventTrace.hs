@@ -32,6 +32,8 @@ symbolic execution.
 
 module Pate.EventTrace
 ( MemEvent(..)
+, pattern ExternalCallEvent
+, pattern ExternalCallEventHidden
 , MemOp(..)
 , MemOpCondition(..)
 , MemOpDirection(..)
@@ -297,10 +299,19 @@ data MemEvent sym ptrW where
     SymBV sym w
       {- ^ Value of r0 during this syscall -} ->
     MemEvent sym ptrW
-  ExternalCallEvent :: forall sym ptrW.
+  ExternalCallEventGen :: forall sym ptrW.
     Text ->
     [ExternalCallData sym ptrW] {- ^ relevant data for this visible call -} ->
+    Bool {- ^ true if this external call is considered observable -} ->
     MemEvent sym ptrW
+
+pattern ExternalCallEvent :: Text -> [ExternalCallData sym ptrW] -> MemEvent sym ptrW
+pattern ExternalCallEvent nm args = ExternalCallEventGen nm args True
+
+pattern ExternalCallEventHidden :: Text -> [ExternalCallData sym ptrW] -> MemEvent sym ptrW
+pattern ExternalCallEventHidden nm args = ExternalCallEventGen nm args False
+
+{-# COMPLETE  MemOpEvent, SyscallEvent, ExternalCallEvent, ExternalCallEventHidden #-}
 
 data ExternalCallData sym ptrW =
     forall tp. ExternalCallDataExpr (SymExpr sym tp)
@@ -524,18 +535,18 @@ instance OrdF (SymExpr sym) => Ord (MemEvent sym ptrW) where
   compare a b = case (a,b) of
     (MemOpEvent op1, MemOpEvent op2) -> compare op1 op2
     (SyscallEvent mt1 bv1, SyscallEvent mt2 bv2) -> compareTrees mt1 mt2 <> (toOrdering $ compareF bv1 bv2)
-    (ExternalCallEvent nm1 vs1, ExternalCallEvent nm2 vs2) -> 
-      compare nm1 nm2 <> (compare vs1 vs2)
+    (ExternalCallEventGen nm1 vs1 obs1, ExternalCallEventGen nm2 vs2 obs2) -> 
+      compare nm1 nm2 <> (compare vs1 vs2) <> compare obs1 obs2
     (MemOpEvent{}, _) -> GT
-    (SyscallEvent{}, ExternalCallEvent{}) -> GT
-    (ExternalCallEvent{}, _) -> LT
+    (SyscallEvent{}, ExternalCallEventGen{}) -> GT
+    (ExternalCallEventGen{}, _) -> LT
     (SyscallEvent{}, MemOpEvent{}) -> LT
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemEvent sym ptrW) where
   w4Serialize = \case
     MemOpEvent mop -> W4S.object ["mem_op" .= mop]
     SyscallEvent i r0 -> W4S.object ["syscall" .= i, "r0" .== r0]
-    ExternalCallEvent nm bvs -> W4S.object ["external_call" .= nm, "args" .= bvs]
+    ExternalCallEventGen nm bvs obs -> W4S.object ["external_call" .= nm, "args" .= bvs, "observable" .= obs]
 
 prettyMemEvent :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemEvent sym ptrW -> Doc ann
 prettyMemEvent (MemOpEvent op) = prettyMemOp op
@@ -544,7 +555,7 @@ prettyMemEvent (SyscallEvent i v) =
     [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
     _ -> "Syscall" <+> printSymExpr v
 prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> vsep (map printExternalCallData vs)
-
+prettyMemEvent (ExternalCallEventHidden nm vs) = "Unobservable External Call At:" <+> pretty nm <+> vsep (map printExternalCallData vs)
 
 instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
   pretty ev = prettyMemEvent ev
@@ -555,14 +566,14 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
     SyscallEvent i arg -> SyscallEvent i <$> f arg
     -- MuxTree is unmodified since it has no symbolic expressions
     -- FIXME: shouldn't we still check the booleans?
-    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> PEM.mapExpr sym f vs
+    ExternalCallEventGen nm vs obs -> ExternalCallEventGen nm <$> PEM.mapExpr sym f vs <*> pure obs
 
 instance PEM.ExprFoldable sym (MemEvent sym w) where
   foldExpr sym f ev b = case ev of
     MemOpEvent op -> PEM.foldExpr sym f op b
     -- FIXME: see above
     SyscallEvent _i arg -> f arg b
-    ExternalCallEvent _nm vs -> PEM.foldExpr sym f vs b
+    ExternalCallEventGen _nm vs _obs -> PEM.foldExpr sym f vs b
 
 filterEvent ::
   IsExprBuilder sym =>
@@ -575,7 +586,7 @@ filterEvent sym f x = case x of
     SyscallEvent{} -> return $ (Nothing, truePred sym)
     -- always include external call events
     ExternalCallEvent{} -> return $ (Nothing, truePred sym)
-    
+    ExternalCallEventHidden{} -> return $ (Nothing, falsePred sym)
     -- Include memory operations only if they acutally
     -- happen (their condition is true) and if they are
     -- deemed observable by the given filtering function.

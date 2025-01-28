@@ -210,9 +210,9 @@ groundMemEvent sym evalFn (MT.SyscallEvent i x) =
   do i' <- MT.toMuxTree sym <$> groundMuxTree sym evalFn i
      x' <- W4.bvLit sym (W4.bvWidth x) =<< W4.groundEval evalFn x
      return (MT.SyscallEvent i' x')
-groundMemEvent sym evalFn (MT.ExternalCallEvent nm xs) = do
+groundMemEvent sym evalFn (MT.ExternalCallEventGen nm xs obs) = do
   xs' <- mapM (MT.groundExternalCallData sym evalFn) xs
-  return (MT.ExternalCallEvent nm xs')
+  return (MT.ExternalCallEventGen nm xs' obs)
 
 groundMemOp ::
   (sym ~ W4.ExprBuilder t st fs, 1 <= ptrW) =>
