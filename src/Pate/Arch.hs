@@ -844,7 +844,7 @@ mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
 
   return $ StateTransformer $ \st -> do
     vals <- mapM (\(Some r) -> getType sym (PS.simRegs st ^. MC.boundValue r)) rArgs
-    Some vals_ctx <- return $ Ctx.fromList vals
+    Some vals_ctx <- return $ Ctx.fromList (concat vals)
     -- globally unique function
     result_fn <- W4U.mkUninterpretedSymFn sym nm (TFC.fmapFC W4.exprType vals_ctx) (W4.BaseBVRepr w)
     fresh_bv <- W4.applySymFn sym result_fn vals_ctx
@@ -866,14 +866,14 @@ mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
       W4.IsExprBuilder sym => 
       sym -> 
       PSR.MacawRegEntry sym tp -> 
-      IO (Some (W4.SymExpr sym))
-    getType sym r = case PSR.macawRegRepr r of
+      IO [Some (W4.SymExpr sym)]
+    getType _sym r = case PSR.macawRegRepr r of
       CLM.LLVMPointerRepr{} -> do
         let CLM.LLVMPointer reg off = PSR.macawRegValue r
         let iRegion = W4.natToIntegerPure reg
-        Some <$> W4.mkStruct sym (Ctx.empty Ctx.:> iRegion Ctx.:> off)
-      LCT.BoolRepr -> return $ Some $ PSR.macawRegValue r
-      LCT.StructRepr Ctx.Empty -> Some <$> W4.mkStruct sym Ctx.empty
+        return $ [Some iRegion, Some off]
+      LCT.BoolRepr -> return $ [Some $ PSR.macawRegValue r]
+      LCT.StructRepr Ctx.Empty -> return []
       x -> error $ "mkDefaultStubOverrideArg: unsupported type" ++ show x
 
 -- | No-op stub
