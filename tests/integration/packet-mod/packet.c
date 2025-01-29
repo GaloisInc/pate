@@ -10,7 +10,7 @@ int check_crc(uint16_t crc, void *data) { return (crc == 0); }
 
 
 #pragma noinline
-void log_info(int log_msg, uint8_t value) {
+void log_info(int log_msg, int value) {
   switch (log_msg) {
     case LOG_MAX_SIZE:
       print("[INFO] Max packet size: ");

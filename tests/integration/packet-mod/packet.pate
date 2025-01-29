@@ -8,14 +8,6 @@ segment1+0x5e8
     Handle observable difference:
       > Avoid difference with equivalence condition
 
-
-segment1+0x5f8 [ via: "log_info" (segment1+0x584) <- "parse_data"
-  ...
-    Call to: "printf"
-    ...
-    Handle observable difference:
-      > Assert difference is infeasible (prove immediately)
-
 Verification Finished
 Continue verification?
     > Finish and view final result
