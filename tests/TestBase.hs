@@ -232,7 +232,7 @@ doTest mwb cfg _sv fp = do
     PEq.Equivalent -> case sv of
       ShouldVerify -> return ()
       _ -> failTest "Unexpectedly proved equivalence."
-    PEq.Inequivalent -> case sv of
+    PEq.Inequivalent{} -> case sv of
       ShouldVerify -> failTest "Failed to prove equivalence."
       ShouldNotVerify -> return ()
       ShouldConditionallyVerify -> failTest "Failed to prove conditional equivalence."
