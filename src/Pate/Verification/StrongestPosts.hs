@@ -627,7 +627,7 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
 
     let do_widen binds pg = fnTrace "do_widen" $ do
           atPriority (raisePriority pr) (Just "Starting Split Analysis") $  do
-            pg2 <- propagateOne scope bundle [ConditionAssumed, ConditionEquiv] nd nd_single ConditionAsserted pg >>= \case
+            pg2 <- propagateOne scope bundle [ConditionAssumed, ConditionEquiv] dom nd nd_single ConditionAsserted pg >>= \case
               (ConditionNotPropagated, pg1) -> return pg1
               (ConditionPropagated preconds, pg1) -> foldM (\pg_ condK -> rewrite_cond condK binds pg_) pg1 (ConditionAsserted:preconds) 
               (ConditionInfeasible, pg1) -> rewrite_cond ConditionAsserted binds pg1
@@ -824,7 +824,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
 
-              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) [ConditionAssumed, ConditionEquiv] nd syncNode ConditionAsserted pg_ >>= \case
+              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) [ConditionAssumed, ConditionEquiv] (singleBundleDomain sbundle) nd syncNode ConditionAsserted pg_ >>= \case
                 (ConditionNotPropagated, _) -> 
                   -- bindings already assumed above
                   return (W4.truePred sym, pg_)
@@ -1986,7 +1986,7 @@ doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
                   choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, RefineUsingExactEquality, PriorityDeferredPropagation)
                   choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, RefineUsingExactEquality, PriorityPropagation)
                   choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, RefineUsingExactEquality, PriorityDeferredPropagation)
-                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingExactEquality, PriorityDeferredPropagation)
+                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingExactEquality, PriorityPropagation)
                   choice "Avoid difference with path-sensitive equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingIntraBlockPaths, PriorityPropagation)
               False -> return Nothing
 
