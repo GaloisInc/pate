@@ -1504,7 +1504,7 @@ def pprint_node_event_trace_domain(trace, pre: str = '', out: IO = sys.stdout):
     # possibly not obvious why a given trace violates the post-condition, which is why I
     # think we included it in the first place.
     if not (postcond):
-        out.write(f'{pre}No Post Condition.\n')
+        out.write(f'{pre}')
         return
 
     if precond:
