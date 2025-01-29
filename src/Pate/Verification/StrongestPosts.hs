@@ -88,6 +88,7 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PEq
 import qualified Pate.Equivalence.MemoryDomain as PEm
@@ -181,7 +182,7 @@ runVerificationLoop ::
 runVerificationLoop env pPairs = do
   result <- runEquivM env doVerify
   case result of
-    Left err -> return (PE.Errored err, mempty)
+    Left err -> return (PE.Errored [err], mempty)
     Right r -> return r
  where
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
@@ -193,7 +194,7 @@ runVerificationLoop env pPairs = do
             -- Report a summary of any errors we found during analysis
             pg1 <- handleDanglingReturns pPairs pg
             reportAnalysisErrors (envLogger env) pg1
-            return $ pairGraphComputeVerdict pg1) (pure . PE.Errored)
+            return $ pairGraphComputeVerdict pg1) (\err -> return $ PE.Errored [err])
 
           emitEvent (PE.StrongestPostOverallResult result)
 
@@ -1130,8 +1131,16 @@ toConditionTraces scope bundle p mtraceT mtraceF = withSym $ \sym -> do
     return (fp,v)
   return (ConditionTraces p mtraceT mtraceF fpvs, eenv)
 
-instance W4S.W4Serializable sym (PE.EquivalenceStatus) where
-  w4Serialize st = W4S.w4SerializeString st
+instance W4S.W4Serializable sym (PEq.EquivalenceStatus) where
+  w4Serialize st = do
+    let (simple :: String) = case st of
+          PEq.Equivalent -> "Equivalent"
+          PEq.Inequivalent{} -> "Inequivalent"
+          PEq.ConditionallyEquivalent -> "ConditionallyEquivalent"
+          PEq.Errored{} -> "Errored"
+    simpleJSON <- W4S.w4SerializeString simple
+    message <- W4S.w4SerializeString (PP.pretty st)
+    W4S.object [ "simple" W4S..= simpleJSON, "message" W4S..= message ]
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalResult sym arch) where
   w4Serialize (FinalResult st obs conds) = do

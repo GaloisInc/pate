@@ -617,9 +617,7 @@ class PateWrapper:
             if not lastTopLevelResult:
                 out.write(f'No equivalence conditions found\n')
             else:
-                eqStatus = lastTopLevelResult.get('content', {}).get('eq_status')
-                out.write(f'Equivalence status: {eqStatus}\n')
-                out.write('\n')
+
                 eqconds = lastTopLevelResult.get('content', {}).get('eq_conditions', {}).get('map')
                 if eqconds:
                     # Found eq conditions
@@ -639,9 +637,9 @@ class PateWrapper:
 
                         # print('CFAR id:', node_id)
 
-                        out.write(f'Equivalence condition for {node_id}\n')
+                        out.write(f'Equivalence condition for {node_id}:\n')
                         pprint_symbolic(out, predicate)
-                        out.write('\n')
+                        out.write('\n\n')
 
                         # out.write('\nTrace True\n')
                         # pprint_node_event_trace(trace_true, 'True Trace', out=out)
@@ -656,7 +654,10 @@ class PateWrapper:
                     ect.trace_false = False
                     ect.traceConstraints = traceConstraints
                     ect.predicate = ect.unconstrainedPredicate
-
+                
+                eqStatus = lastTopLevelResult.get('content', {}).get('eq_status').get('message')
+                out.write(f'Equivalence status: {eqStatus}\n')
+                
             self.user.show_message(out.getvalue())
         if self.last_cfar_graph:
             self.user.show_cfar_graph(self.last_cfar_graph)

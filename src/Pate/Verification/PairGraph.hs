@@ -151,6 +151,7 @@ import           Control.Monad.Trans.Except (runExceptT)
 import           Control.Monad.Trans.State.Strict (runState)
 import           Control.Monad.Trans.Writer hiding (tell)
 import           Control.Monad.Writer
+import           Data.List (intercalate)
 
 import qualified Control.Lens as L
 import           Control.Lens ( (&), (.~), (^.), (%~) )
@@ -1238,28 +1239,44 @@ reportAnalysisErrors logAction gr =
 -- | After computing the dataflow fixpoint, examine the generated
 --   error reports to determine an overall verdict for the programs.
 pairGraphComputeVerdict ::
+  forall sym arch.
+  PA.ValidArch arch =>
   PairGraph sym arch ->
   PE.EquivalenceStatus
 pairGraphComputeVerdict gr =
-  if Map.null (pairGraphObservableReports gr) &&
-     Map.null (pairGraphDesyncReports gr) &&
-     not (unsolvedAsserts gr) &&
-     Set.null (pairGraphGasExhausted gr) then
-    case filter (\(_,condK) -> case condK of {ConditionEquiv{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
+  let 
+     
+    ineq :: String -> [GraphNode arch] -> PE.EquivalenceStatus
+    ineq header vals = PE.Inequivalent 
+      [header ++ " " ++ intercalate ", " (map (\nd -> show $ tracePrettyNode nd "") vals) ++ "."]
+  
+    obsStat = case Map.keys (pairGraphObservableReports gr) of
+      [] -> mempty
+      obs -> ineq "Observable differences at:" $ map GraphNode obs
+    desyncStat = case Map.keys (pairGraphObservableReports gr) of
+      [] -> mempty
+      desync -> ineq "Control flow desynchronization at:" $ map GraphNode desync
+    assertStat = case unsolvedAsserts gr of
+      [] -> mempty
+      asserts -> ineq "Failed to discharge assertion at:"  asserts
+    gasStat = case Set.toList (pairGraphGasExhausted gr) of
+      [] -> mempty
+      exhausts -> ineq "Ran out of gas while widening equivalence domains for:" exhausts
+    condStat = case filter (\(_,condK) -> case condK of {ConditionEquiv{} -> True; _ -> False}) (Map.keys (pairGraphConditions gr)) of
       [] -> PE.Equivalent
       _ -> PE.ConditionallyEquivalent
-  else
-    PE.Inequivalent
+  in mconcat [obsStat, desyncStat, assertStat, gasStat, condStat]
 
+-- TODO: note where assertion was originally made, rather than the root node
 unsolvedAsserts ::
-  PairGraph sym arch -> Bool
+  PairGraph sym arch -> [GraphNode arch]
 unsolvedAsserts pg = 
   let 
     cond_nodes = Map.keys (pairGraphConditions pg)
     go (nd, condK) = case condK of
-      ConditionAsserted{} -> isRootNode nd
-      _ -> False
-  in any go cond_nodes
+      ConditionAsserted{} | isRootNode nd -> Just nd
+      _ -> Nothing
+  in mapMaybe go cond_nodes
 
 -- | Drop the given node from the work queue if it is queued.
 --   Otherwise do nothing.
