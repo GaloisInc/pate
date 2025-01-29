@@ -74,6 +74,7 @@ module Pate.Verification.PairGraph.Node (
   , withKnownBin
   , toTwoSidedNode
   , asSingleNode
+  , tracePrettyNode
   ) where
 
 import           Prettyprinter ( Pretty(..), sep, (<+>), Doc )

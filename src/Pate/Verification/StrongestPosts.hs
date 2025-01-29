@@ -88,6 +88,7 @@ import qualified Pate.Discovery as PD
 import qualified Pate.Discovery.ParsedFunctions as PD
 import qualified Pate.Config as PCfg
 import qualified Pate.Equivalence as PE
+import qualified Pate.Equivalence as PEq
 import qualified Pate.Equivalence.RegisterDomain as PER
 import qualified Pate.Equivalence.EquivalenceDomain as PEq
 import qualified Pate.Equivalence.MemoryDomain as PEm
@@ -181,7 +182,7 @@ runVerificationLoop ::
 runVerificationLoop env pPairs = do
   result <- runEquivM env doVerify
   case result of
-    Left err -> return (PE.Errored err, mempty)
+    Left err -> return (PE.Errored [err], mempty)
     Right r -> return r
  where
    doVerify :: EquivM sym arch (PE.EquivalenceStatus, PESt.EquivalenceStatistics)
@@ -193,7 +194,7 @@ runVerificationLoop env pPairs = do
             -- Report a summary of any errors we found during analysis
             pg1 <- handleDanglingReturns pPairs pg
             reportAnalysisErrors (envLogger env) pg1
-            return $ pairGraphComputeVerdict pg1) (pure . PE.Errored)
+            return $ pairGraphComputeVerdict pg1) (\err -> return $ PE.Errored [err])
 
           emitEvent (PE.StrongestPostOverallResult result)
 
@@ -627,7 +628,7 @@ initSingleSidedDomain sne pg0 = withRepr bin $ withRepr (PBi.flipRepr bin) $ wit
 
     let do_widen binds pg = fnTrace "do_widen" $ do
           atPriority (raisePriority pr) (Just "Starting Split Analysis") $  do
-            pg2 <- propagateOne scope bundle [ConditionAssumed, ConditionEquiv] nd nd_single ConditionAsserted pg >>= \case
+            pg2 <- propagateOne scope bundle [ConditionAssumed, ConditionEquiv] dom nd nd_single ConditionAsserted pg >>= \case
               (ConditionNotPropagated, pg1) -> return pg1
               (ConditionPropagated preconds, pg1) -> foldM (\pg_ condK -> rewrite_cond condK binds pg_) pg1 (ConditionAsserted:preconds) 
               (ConditionInfeasible, pg1) -> rewrite_cond ConditionAsserted binds pg1
@@ -824,7 +825,7 @@ mergeSingletons sneO sneP pg = fnTrace "mergeSingletons" $ withSym $ \sym -> do
               let nd = GraphNode $ singleToNodeEntry sne
               let scope = singleBundleScope sbundle
 
-              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) [ConditionAssumed, ConditionEquiv] nd syncNode ConditionAsserted pg_ >>= \case
+              liftEqM $ \pg_ -> propagateOne scope  (singleBundle sbundle) [ConditionAssumed, ConditionEquiv] (singleBundleDomain sbundle) nd syncNode ConditionAsserted pg_ >>= \case
                 (ConditionNotPropagated, _) -> 
                   -- bindings already assumed above
                   return (W4.truePred sym, pg_)
@@ -1130,8 +1131,16 @@ toConditionTraces scope bundle p mtraceT mtraceF = withSym $ \sym -> do
     return (fp,v)
   return (ConditionTraces p mtraceT mtraceF fpvs, eenv)
 
-instance W4S.W4Serializable sym (PE.EquivalenceStatus) where
-  w4Serialize st = W4S.w4SerializeString st
+instance W4S.W4Serializable sym (PEq.EquivalenceStatus) where
+  w4Serialize st = do
+    let (simple :: String) = case st of
+          PEq.Equivalent -> "Equivalent"
+          PEq.Inequivalent{} -> "Inequivalent"
+          PEq.ConditionallyEquivalent -> "ConditionallyEquivalent"
+          PEq.Errored{} -> "Errored"
+    simpleJSON <- W4S.w4SerializeString simple
+    message <- W4S.w4SerializeString (PP.pretty st)
+    W4S.object [ "simple" W4S..= simpleJSON, "message" W4S..= message ]
 
 instance (PA.ValidArch arch, PSo.ValidSym sym) => W4S.W4Serializable sym (FinalResult sym arch) where
   w4Serialize (FinalResult st obs conds) = do
@@ -1986,7 +1995,7 @@ doCheckObservables scope ne bundle preD pg = case PS.simOut bundle of
                   choice "Assert difference is infeasible (defer proof)" () $ return $ Just (ConditionAsserted, RefineUsingExactEquality, PriorityDeferredPropagation)
                   choice "Assert difference is infeasible (prove immediately)" () $ return $ Just (ConditionAsserted, RefineUsingExactEquality, PriorityPropagation)
                   choice "Assume difference is infeasible" () $ return $ Just (ConditionAssumed, RefineUsingExactEquality, PriorityDeferredPropagation)
-                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingExactEquality, PriorityDeferredPropagation)
+                  choice "Avoid difference with equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingExactEquality, PriorityPropagation)
                   choice "Avoid difference with path-sensitive equivalence condition" () $ return $ Just (ConditionEquiv, RefineUsingIntraBlockPaths, PriorityPropagation)
               False -> return Nothing
 
@@ -2118,8 +2127,9 @@ equivalentSequences' sym cache = \xs ys -> loop [xs] [ys]
          liftIO $ W4.bvEq sym x y
        _ -> return (W4.falsePred sym)
 
-  eqEvent (MT.ExternalCallEvent nmx x) (MT.ExternalCallEvent nmy y)
+  eqEvent (MT.ExternalCallEventGen nmx x obsx) (MT.ExternalCallEventGen nmy y obsy)
     | nmx == nmy
+    , obsx == obsy
     = IO.liftIO $  do
       ps <- mapM (\(x_,y_) -> ET.compareExternalCallData sym x_ y_) (zip x y)
       foldM (W4.andPred sym) (W4.truePred sym) ps

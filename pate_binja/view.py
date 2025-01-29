@@ -457,7 +457,7 @@ class TraceWidget(QWidget):
             self.traceDiff.clear('None')
             return
 
-        self._setDomainText('NA')
+        self._setDomainText('')
 
         pw: Optional[PateWidget] = getAncestorInstanceOf(self, PateWidget)
 
@@ -552,7 +552,18 @@ class PateCfarEqCondDialog(QDialog):
         self.eqCondField.setReadOnly(True)
         self.eqCondField.setMaximumBlockCount(1000)
         eqCondBoxLayout = QVBoxLayout()
-        eqCondBoxLayout.addWidget(QLabel("Programs behave equivalently when:"))
+        label_prefix = ''
+        match label:
+          case 'Asserted Condition':
+            label_prefix = 'Asserted precondition'
+          case 'Assumed Condition':
+            label_prefix = 'Assumed precondition'
+          case 'Equivalence Condition':
+            label_prefix = 'Assumed equivalence condition'
+          case _:
+            label_prefix = 'Precondition'
+
+        eqCondBoxLayout.addWidget(QLabel(f'{label_prefix} (assuming all ancestor preconditions):'))
         eqCondBoxLayout.addWidget(self.eqCondField)
         eqCondBox = QWidget()
         eqCondBox.setLayout(eqCondBoxLayout)
@@ -570,8 +581,8 @@ class PateCfarEqCondDialog(QDialog):
         # Diff Mode Control
         diffModeLabel = QLabel("Difference mode:")
         self.diffModeComboBox = QComboBox()
-        self.diffModeComboBox.addItem("Original VS Patched")
-        self.diffModeComboBox.addItem("Equivalent VS Different")
+        self.diffModeComboBox.addItem("Original vs. Patched")
+        self.diffModeComboBox.addItem("Condition assumed TRUE vs. FALSE")
         self.diffModeComboBox.currentTextChanged.connect(self.diffModeChanged)
         diffModeBoxLayout = QHBoxLayout()
         diffModeBoxLayout.addWidget(diffModeLabel)
@@ -638,14 +649,14 @@ class PateCfarEqCondDialog(QDialog):
                 else:
                     out.write('\nEquivalence condition unsatisfiable with user-supplied constraints.\n')
             else:
-                out.write('\nNo user-supplied trace constraints.\n')
+                out.write('')
             self.eqCondField.appendPlainText(out.getvalue())
-        if self.diffModeComboBox.currentText() == "Original VS Patched":
+        if self.diffModeComboBox.currentText() == "Original vs. Patched":
             # Original VS Patch Diff Mode
             self.trueTraceWidget.setTrace(self.conditionTrace.trace_true)
-            self.trueTraceLabel.setText('Trace showing EQUIVALENT behaviour, original vs patched:')
+            self.trueTraceLabel.setText('Trace assuming above condition is TRUE, original vs. patched:')
             self.falseTraceWidget.setTrace(self.conditionTrace.trace_false)
-            self.falseTraceLabel.setText('Trace showing DIFFERENT behaviour, original vs patched:')
+            self.falseTraceLabel.setText('Trace assuming above condition is FALSE, original vs. patched:')
         else:
             # Positive VS Negative Diff Mode
             # TODO: What about conditions in this mode? Drop?
@@ -672,9 +683,9 @@ class PateCfarEqCondDialog(QDialog):
                 pbv = None
 
             self.trueTraceWidget.setTracePosVsNeg(originalPosTrace, originalNegTrace, pbv)
-            self.trueTraceLabel.setText('Trace showing original program, EQUIVALENT vs DIFFERENT behaviour:')
+            self.trueTraceLabel.setText('Trace for original, assuming above condition is TRUE vs. FALSE:')
             self.falseTraceWidget.setTracePosVsNeg(patchedPosTrace, patchedNegTrace, obv)
-            self.falseTraceLabel.setText('Trace showing patched program, EQUIVALENT vs DIFFERENT behaviour:')
+            self.falseTraceLabel.setText('Trace for patched, assuming above condition is TRUE vs. FALSE:')
 
     def diffModeChanged(self, text):
         print('Difference mode:', self.diffModeComboBox.currentText())

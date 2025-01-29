@@ -112,7 +112,7 @@ runEquivVerification validArch@(PA.SomeValidArch {}) loadErrs (Logger logAct con
     (e : es) -> LJ.writeLog logAct (PE.HintErrorsBSI (e DLN.:| es))
     _ -> return ()
   st <- (CME.runExceptT $ PV.verifyPairs validArch logAct original patched dcfg pd) >>= \case
-    Left err -> return $ PEq.Errored err
+    Left err -> return $ PEq.Errored [err]
     Right st -> return st
   -- Shut down the logger cleanly (if we can - the interactive logger will be
   -- persistent until the user kills it)
@@ -131,7 +131,7 @@ liftToEquivStatus ::
 liftToEquivStatus cfg f = do
   v <- CME.runExceptT (CMW.runWriterT (CMR.runReaderT f (elfLoaderConfig cfg)))
   case v of
-    Left err -> return $ PEq.Errored (PEE.loaderError err)
+    Left err -> return $ PEq.Errored [PEE.loaderError err]
     Right (b, _) -> return b
 
 -- | Given a patch configuration, check that

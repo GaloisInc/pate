@@ -54,6 +54,7 @@ module Pate.Equivalence
 
 import           Control.Lens hiding ( op, pre, (.=) )
 import           Control.Monad ( foldM )
+import qualified Prettyprinter as PP
 import           Data.Parameterized.Classes
 import           Data.Parameterized.Some
 import qualified Data.Parameterized.TraversableF as TF
@@ -93,17 +94,18 @@ import           What4.JSON ((.=))
 
 data EquivalenceStatus =
     Equivalent
-  | Inequivalent
+  | Inequivalent [String]
   | ConditionallyEquivalent
-  | Errored PEE.EquivalenceError
+  | Errored [PEE.EquivalenceError]
 
 deriving instance Show EquivalenceStatus
 
 instance Semigroup EquivalenceStatus where
   Errored err <> _ = Errored err
   _ <> Errored err = Errored err
-  Inequivalent <> _ = Inequivalent
-  _ <> Inequivalent = Inequivalent
+  Inequivalent msg1 <> Inequivalent msg2 = Inequivalent (msg1 ++ msg2)
+  Inequivalent msg1 <> _ = Inequivalent msg1
+  _ <> Inequivalent msg2 = Inequivalent msg2
   ConditionallyEquivalent <> _ = ConditionallyEquivalent
   _ <> ConditionallyEquivalent = ConditionallyEquivalent
   Equivalent <> Equivalent = Equivalent
@@ -111,13 +113,21 @@ instance Semigroup EquivalenceStatus where
 instance Monoid EquivalenceStatus where
   mempty = Equivalent
 
+instance PP.Pretty EquivalenceStatus where
+  pretty = \case
+    Equivalent -> "Binaries are observably equivalent"
+    Inequivalent msgs -> "Binaries are not observably equivalent" <> case msgs of
+      [] -> ""
+      _ -> ": " <> PP.hsep (map PP.pretty msgs)
+    ConditionallyEquivalent -> "Binaries are conditionally, observably equivalent"
+    Errored errs -> "Analysis failure due to error" <> case errs of
+      [] -> ""
+      [err] -> ": " <> PP.pretty err
+      _ -> "s: " <> PP.vsep (map PP.pretty errs)
+
 instance IsTraceNode k "equivalence_result" where
   type TraceNodeType k "equivalence_result" = EquivalenceStatus
-  prettyNode () = \case
-    Equivalent -> "Binaries are observably equivalent"
-    Inequivalent -> "Binaries are not observably equivalent"
-    ConditionallyEquivalent -> "Binaries are conditionally, observably equivalent"
-    Errored{} -> "Analysis failure due to error"
+  prettyNode () = PP.pretty
   nodeTags = mkTags @k @"equivalence_result" [Summary, Simplified]
 
 ---------------------------------------
