@@ -71,7 +71,7 @@ import qualified Data.Parameterized.Context as Ctx
 
 import           What4.Interface hiding ( integerToNat )
 
-import           Lang.Crucible.LLVM.MemModel (LLVMPtr, pattern LLVMPointer, ppPtr)
+import           Lang.Crucible.LLVM.MemModel (LLVMPtr, pattern LLVMPointer, ppPtr )
 import           Lang.Crucible.Utils.MuxTree ( MuxTree, viewMuxTree )
 import           Lang.Crucible.Simulator.SymSequence ( SymSequence(..), muxSymSequence, evalWithFreshCache, nilSymSequence, consSymSequence, appendSymSequence, isNilSymSequence, traverseSymSequence )
 
@@ -315,20 +315,24 @@ pattern ExternalCallEventHidden nm args = ExternalCallEventGen nm args False
 
 data ExternalCallData sym ptrW =
     forall tp. ExternalCallDataExpr (SymExpr sym tp)
+  | forall w. 1 <= w => ExternalCallDataPointer (Ptr.Pointer sym w)
   | ExternalCallDataChunk (MemChunk sym ptrW)
 
 instance PEM.ExprMappable sym (ExternalCallData sym ptrW) where
   mapExpr sym f = \case
     ExternalCallDataExpr e -> ExternalCallDataExpr <$> f e
+    ExternalCallDataPointer ptr -> ExternalCallDataPointer <$> PEM.mapExpr sym f ptr
     ExternalCallDataChunk c -> ExternalCallDataChunk <$> PEM.mapExpr sym f c
 
 instance PEM.ExprFoldable sym (ExternalCallData sym ptrW) where
   foldExpr sym f ec b = case ec of
     ExternalCallDataExpr e -> f e b
+    ExternalCallDataPointer ptr -> PEM.foldExpr sym f ptr b
     ExternalCallDataChunk c -> PEM.foldExpr sym f c b
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (ExternalCallData sym ptrW) where
   w4Serialize (ExternalCallDataExpr e) = W4S.object ["data_expr" .== e]
+  w4Serialize (ExternalCallDataPointer ptr) = W4S.object ["pointer" .== ptr]
   w4Serialize (ExternalCallDataChunk c) = W4S.object ["mem_chunk" .= c]
 
 instance OrdF (SymExpr sym) => Eq (ExternalCallData sym ptrW) where
@@ -337,8 +341,18 @@ instance OrdF (SymExpr sym) => Eq (ExternalCallData sym ptrW) where
 instance OrdF (SymExpr sym) => Ord (ExternalCallData sym ptrW) where
   compare (ExternalCallDataExpr e1) (ExternalCallDataExpr e2) = toOrdering $ compareF e1 e2
   compare (ExternalCallDataChunk c1) (ExternalCallDataChunk c2) = compare c1 c2
+  compare (ExternalCallDataPointer ptr1) (ExternalCallDataPointer ptr2) = 
+    toOrdering $  compareF ptr1 ptr2
+
+  compare (ExternalCallDataExpr{}) (ExternalCallDataPointer{}) = LT
   compare (ExternalCallDataExpr{}) (ExternalCallDataChunk{}) = LT
+
+  compare (ExternalCallDataPointer{}) (ExternalCallDataExpr{}) = GT
+  compare (ExternalCallDataPointer{}) (ExternalCallDataChunk{}) = LT
+
   compare (ExternalCallDataChunk{}) (ExternalCallDataExpr{})  = GT
+  compare (ExternalCallDataChunk{}) (ExternalCallDataPointer{})  = GT
+
 
 groundExternalCallData ::
   forall sym ptrW t st fs. sym ~ W4B.ExprBuilder t st fs =>
@@ -351,6 +365,7 @@ groundExternalCallData sym evalFn = \case
   ExternalCallDataExpr e -> ExternalCallDataExpr <$> do
     e_g <- W4G.groundEval evalFn e
     PVC.symbolicFromConcrete sym e_g e
+  ExternalCallDataPointer ptr -> ExternalCallDataPointer <$> Ptr.groundPtr sym evalFn ptr
   ExternalCallDataChunk (MemChunk mem base len) -> ExternalCallDataChunk <$> do
     let ptrW = memWidthNatRepr @ptrW
     base_g <- W4G.groundEval evalFn base
@@ -381,6 +396,8 @@ compareExternalCallData ::
 compareExternalCallData sym ec1 ec2 = case (ec1, ec2) of
   (ExternalCallDataExpr e1, ExternalCallDataExpr e2) | Just Refl <- testEquality (exprType e1) (exprType e2) ->
     isEq sym e1 e2
+  (ExternalCallDataPointer ptr1, ExternalCallDataPointer ptr2) ->
+    Ptr.ptrEq sym ptr1 ptr2
   (ExternalCallDataChunk (MemChunk mem1 base1 len1), ExternalCallDataChunk (MemChunk mem2 base2 len2)) -> do
     len_eq <- isEq sym len1 len2
     let ptrW = MC.memWidthNatRepr @ptrW
@@ -419,6 +436,7 @@ printExternalCallData ::
   ExternalCallData sym ptrW ->
   Doc a
 printExternalCallData (ExternalCallDataExpr e) = printSymExpr e
+printExternalCallData (ExternalCallDataPointer ptr) = pretty ptr
 printExternalCallData (ExternalCallDataChunk (MemChunk mem1 base1 len1)) =
   "TODO print mem chunk: " <+> printSymExpr mem1 <+> printSymExpr base1 <+> printSymExpr len1
 

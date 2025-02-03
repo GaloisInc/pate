@@ -128,6 +128,7 @@ import Data.Maybe
 import Pate.Memory
 import qualified Pate.ExprMappable as PEM
 import Control.Monad (forM)
+import qualified Pate.Pointer as Ptr
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -843,8 +844,9 @@ mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
 
   return $ StateTransformer $ \st -> do
-    vals <- mapM (\(Some r) -> getType sym (PS.simRegs st ^. MC.boundValue r)) rArgs
-    Some vals_ctx <- return $ Ctx.fromList (concat vals)
+    datas <- concat <$> mapM (\(Some r) -> getType sym (PS.simRegs st ^. MC.boundValue r)) rArgs
+    dataExprs <- PEM.foldExpr sym (\e_ es_ -> return (Some e_:es_)) datas [] 
+    Some vals_ctx <- return $ Ctx.fromList (reverse dataExprs)
     -- globally unique function
     result_fn <- W4U.mkUninterpretedSymFn sym nm (TFC.fmapFC W4.exprType vals_ctx) (W4.BaseBVRepr w)
     fresh_bv <- W4.applySymFn sym result_fn vals_ctx
@@ -856,8 +858,8 @@ mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
         -- the call was saved. Ideally there would be a formal slot in the
         -- event to store this information.
         let nm' = rOutNm ++ " <- " ++ nm
-        IO.liftIO $ PMT.addExternalCallEvent sym (T.pack nm') vals_ctx False mem0
-      Nothing -> IO.liftIO $ PMT.addExternalCallEvent sym (T.pack nm) vals_ctx False mem0
+        IO.liftIO $ PMT.addMemEvent sym (PMT.ExternalCallEventHidden (T.pack nm') datas) mem0
+      Nothing -> IO.liftIO $ PMT.addMemEvent sym (PMT.ExternalCallEventHidden (T.pack nm) datas) mem0
     val <- IO.liftIO $ PSR.bvToEntry sym fresh_bv
     updateRegister sym rOut val (st { PS.simMem = mem1 })
 
@@ -866,13 +868,12 @@ mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
       W4.IsExprBuilder sym => 
       sym -> 
       PSR.MacawRegEntry sym tp -> 
-      IO [Some (W4.SymExpr sym)]
+      IO [PMT.ExternalCallData sym (MC.ArchAddrWidth arch)]
     getType _sym r = case PSR.macawRegRepr r of
-      CLM.LLVMPointerRepr{} -> do
-        let CLM.LLVMPointer reg off = PSR.macawRegValue r
-        let iRegion = W4.natToIntegerPure reg
-        return $ [Some iRegion, Some off]
-      LCT.BoolRepr -> return $ [Some $ PSR.macawRegValue r]
+      CLM.LLVMPointerRepr{} -> 
+        return $ [PMT.ExternalCallDataPointer (Ptr.fromLLVMPointer $ PSR.macawRegValue r )]
+
+      LCT.BoolRepr -> return $ [PMT.ExternalCallDataExpr $ PSR.macawRegValue r]
       LCT.StructRepr Ctx.Empty -> return []
       x -> error $ "mkDefaultStubOverrideArg: unsupported type" ++ show x
 

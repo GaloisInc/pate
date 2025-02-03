@@ -1616,6 +1616,8 @@ def pprint_mem_op(mem_op: dict, pre: str = '', out: IO = sys.stdout, prune_zero:
 def pretty_call_arg(arg):
     if isinstance(arg, dict) and 'data_expr' in arg:
         return str(arg['data_expr'])
+    elif isinstance(arg, dict) and 'pointer' in arg:
+      return (get_value_id(arg['pointer']))
     else:
         return str(arg)
 

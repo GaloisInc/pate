@@ -67,6 +67,7 @@ module Pate.Memory.MemTrace
 , prettyMemTraceSeq
 , addExternalCallEvent
 , addExternalCallWrite
+, addMemEvent
 , SymBV'(..)
 , getPtrAssertion
 , PtrAssertions
