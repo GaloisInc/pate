@@ -1253,7 +1253,7 @@ pairGraphComputeVerdict gr =
     obsStat = case Map.keys (pairGraphObservableReports gr) of
       [] -> mempty
       obs -> ineq "Observable differences at:" $ map GraphNode obs
-    desyncStat = case Map.keys (pairGraphObservableReports gr) of
+    desyncStat = case Map.keys (pairGraphDesyncReports gr) of
       [] -> mempty
       desync -> ineq "Control flow desynchronization at:" $ map GraphNode desync
     assertStat = case unsolvedAsserts gr of
