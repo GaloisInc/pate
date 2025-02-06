@@ -42,9 +42,7 @@ module Pate.Proof
   , ProofNonceApp
   , unNonceProof
   , ProofExpr(..)
-  , collectProofExpr
   , BlockSliceTransition(..)
-  , foldrMBlockStateLocs
   , BlockSliceState(..)
   , BlockSliceRegOp(..)
   , BlockSliceMemOp(..)
@@ -61,12 +59,10 @@ module Pate.Proof
   , InequivalenceResult
   , withIneqResult
   , CondEquivalenceResult(..)
-  , emptyCondEqResult
   ) where
 
 import           Data.Functor.Const
 import           Control.Monad.Identity
-import           Control.Monad.Writer.Strict as CMW
 import qualified Data.Kind as DK
 import           Numeric.Natural ( Natural )
 
@@ -74,7 +70,6 @@ import           Data.Parameterized.Some
 import           Data.Parameterized.Classes
 import qualified Data.Parameterized.Nonce as N
 import qualified Data.Parameterized.Map as MapF
-import qualified Data.Parameterized.TraversableF as TF
 
 import qualified Data.Macaw.CFG as MM
 import qualified Data.Macaw.CFGSlice as MCS
@@ -92,7 +87,6 @@ import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Ground as PG
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Solver as PSo
 import qualified Pate.Verification.MemoryLog as PVM
 import qualified Pate.MemCell as PMC
 import qualified Pate.SimulatorRegisters as PSR
@@ -158,14 +152,6 @@ data CondEquivalenceResult sym arch where
     -- ^ true if the negation of this predicate necessarily implies an
     -- abort path on the original binary
     } -> CondEquivalenceResult sym arch
-
-emptyCondEqResult ::
-  forall arch sym.
-  PA.ValidArch arch =>
-  PSo.ValidSym sym =>
-  sym ->
-  CondEquivalenceResult sym arch
-emptyCondEqResult sym = CondEquivalenceResult MapF.empty (W4.falsePred sym) False
 
 
 
@@ -320,29 +306,6 @@ mapProofApp f app = runIdentity $ traverseProofApp (\app' -> Identity $ f app') 
 data ProofExpr sym arch tp where
   ProofExpr :: { unApp :: ProofApp sym arch (ProofExpr sym arch) tp } -> ProofExpr sym arch tp
 
--- | Traverse all sub-expressions of a 'ProofExpr'
-traverseProofExpr ::
-  Monad m =>
-  (forall tp'. ProofExpr sym arch tp' -> m (ProofExpr sym arch tp')) ->
-  ProofExpr sym arch tp ->
-  m (ProofExpr sym arch tp)
-traverseProofExpr f e =
-  ProofExpr <$> (traverseProofApp (traverseProofExpr f) =<< (unApp <$> f e))
-
--- | Collect results from all sub-expressions
-collectProofExpr ::
-  forall w sym arch tp.
-  Monoid w =>
-  (forall tp'. ProofExpr sym arch tp' -> w) ->
-  ProofExpr sym arch tp ->
-  w
-collectProofExpr f e_outer = runIdentity $ CMW.execWriterT (traverseProofExpr go e_outer)
-  where
-    go :: ProofExpr sym arch tp' -> CMW.WriterT w Identity (ProofExpr sym arch tp')
-    go e = do
-      CMW.tell (f e)
-      return e
-
 type family SymScope sym :: DK.Type
 type instance SymScope (W4B.ExprBuilder t fs scope) = t
 
@@ -451,15 +414,3 @@ instance PEM.ExprMappable sym (BlockSliceMemOp sym w) where
     <$> PPa.traverse (\(Const x) -> Const <$> W4H.mapExprPtr sym f x) (slMemOpValues memOp)
     <*> f (slMemOpEquiv memOp)
     <*> f (slMemOpCond memOp)
-
-
-foldrMBlockStateLocs ::
-  Monad m =>
-  (forall tp. MM.ArchReg arch tp -> BlockSliceRegOp sym tp -> b -> m b) ->
-  (forall w. PMC.MemCell sym arch w -> BlockSliceMemOp sym w -> b -> m b) ->
-  b ->
-  BlockSliceState sym arch ->
-  m b
-foldrMBlockStateLocs f_reg f_mem b (BlockSliceState a1 a2) = do
-  b' <- MapF.foldrMWithKey f_mem b a1
-  MapF.foldrMWithKey f_reg b' (MM.regStateMap a2) 
