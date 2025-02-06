@@ -32,6 +32,8 @@ symbolic execution.
 
 module Pate.EventTrace
 ( MemEvent(..)
+, pattern ExternalCallEvent
+, pattern ExternalCallEventHidden
 , MemOp(..)
 , MemOpCondition(..)
 , MemOpDirection(..)
@@ -69,7 +71,7 @@ import qualified Data.Parameterized.Context as Ctx
 
 import           What4.Interface hiding ( integerToNat )
 
-import           Lang.Crucible.LLVM.MemModel (LLVMPtr, pattern LLVMPointer, ppPtr)
+import           Lang.Crucible.LLVM.MemModel (LLVMPtr, pattern LLVMPointer, ppPtr )
 import           Lang.Crucible.Utils.MuxTree ( MuxTree, viewMuxTree )
 import           Lang.Crucible.Simulator.SymSequence ( SymSequence(..), muxSymSequence, evalWithFreshCache, nilSymSequence, consSymSequence, appendSymSequence, isNilSymSequence, traverseSymSequence )
 
@@ -297,27 +299,40 @@ data MemEvent sym ptrW where
     SymBV sym w
       {- ^ Value of r0 during this syscall -} ->
     MemEvent sym ptrW
-  ExternalCallEvent :: forall sym ptrW.
+  ExternalCallEventGen :: forall sym ptrW.
     Text ->
     [ExternalCallData sym ptrW] {- ^ relevant data for this visible call -} ->
+    Bool {- ^ true if this external call is considered observable -} ->
     MemEvent sym ptrW
+
+pattern ExternalCallEvent :: Text -> [ExternalCallData sym ptrW] -> MemEvent sym ptrW
+pattern ExternalCallEvent nm args = ExternalCallEventGen nm args True
+
+pattern ExternalCallEventHidden :: Text -> [ExternalCallData sym ptrW] -> MemEvent sym ptrW
+pattern ExternalCallEventHidden nm args = ExternalCallEventGen nm args False
+
+{-# COMPLETE  MemOpEvent, SyscallEvent, ExternalCallEvent, ExternalCallEventHidden #-}
 
 data ExternalCallData sym ptrW =
     forall tp. ExternalCallDataExpr (SymExpr sym tp)
+  | forall w. 1 <= w => ExternalCallDataPointer (Ptr.Pointer sym w)
   | ExternalCallDataChunk (MemChunk sym ptrW)
 
 instance PEM.ExprMappable sym (ExternalCallData sym ptrW) where
   mapExpr sym f = \case
     ExternalCallDataExpr e -> ExternalCallDataExpr <$> f e
+    ExternalCallDataPointer ptr -> ExternalCallDataPointer <$> PEM.mapExpr sym f ptr
     ExternalCallDataChunk c -> ExternalCallDataChunk <$> PEM.mapExpr sym f c
 
 instance PEM.ExprFoldable sym (ExternalCallData sym ptrW) where
   foldExpr sym f ec b = case ec of
     ExternalCallDataExpr e -> f e b
+    ExternalCallDataPointer ptr -> PEM.foldExpr sym f ptr b
     ExternalCallDataChunk c -> PEM.foldExpr sym f c b
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (ExternalCallData sym ptrW) where
   w4Serialize (ExternalCallDataExpr e) = W4S.object ["data_expr" .== e]
+  w4Serialize (ExternalCallDataPointer ptr) = W4S.object ["pointer" .== ptr]
   w4Serialize (ExternalCallDataChunk c) = W4S.object ["mem_chunk" .= c]
 
 instance OrdF (SymExpr sym) => Eq (ExternalCallData sym ptrW) where
@@ -326,8 +341,18 @@ instance OrdF (SymExpr sym) => Eq (ExternalCallData sym ptrW) where
 instance OrdF (SymExpr sym) => Ord (ExternalCallData sym ptrW) where
   compare (ExternalCallDataExpr e1) (ExternalCallDataExpr e2) = toOrdering $ compareF e1 e2
   compare (ExternalCallDataChunk c1) (ExternalCallDataChunk c2) = compare c1 c2
+  compare (ExternalCallDataPointer ptr1) (ExternalCallDataPointer ptr2) = 
+    toOrdering $  compareF ptr1 ptr2
+
+  compare (ExternalCallDataExpr{}) (ExternalCallDataPointer{}) = LT
   compare (ExternalCallDataExpr{}) (ExternalCallDataChunk{}) = LT
+
+  compare (ExternalCallDataPointer{}) (ExternalCallDataExpr{}) = GT
+  compare (ExternalCallDataPointer{}) (ExternalCallDataChunk{}) = LT
+
   compare (ExternalCallDataChunk{}) (ExternalCallDataExpr{})  = GT
+  compare (ExternalCallDataChunk{}) (ExternalCallDataPointer{})  = GT
+
 
 groundExternalCallData ::
   forall sym ptrW t st fs. sym ~ W4B.ExprBuilder t st fs =>
@@ -340,6 +365,7 @@ groundExternalCallData sym evalFn = \case
   ExternalCallDataExpr e -> ExternalCallDataExpr <$> do
     e_g <- W4G.groundEval evalFn e
     PVC.symbolicFromConcrete sym e_g e
+  ExternalCallDataPointer ptr -> ExternalCallDataPointer <$> Ptr.groundPtr sym evalFn ptr
   ExternalCallDataChunk (MemChunk mem base len) -> ExternalCallDataChunk <$> do
     let ptrW = memWidthNatRepr @ptrW
     base_g <- W4G.groundEval evalFn base
@@ -370,6 +396,8 @@ compareExternalCallData ::
 compareExternalCallData sym ec1 ec2 = case (ec1, ec2) of
   (ExternalCallDataExpr e1, ExternalCallDataExpr e2) | Just Refl <- testEquality (exprType e1) (exprType e2) ->
     isEq sym e1 e2
+  (ExternalCallDataPointer ptr1, ExternalCallDataPointer ptr2) ->
+    Ptr.ptrEq sym ptr1 ptr2
   (ExternalCallDataChunk (MemChunk mem1 base1 len1), ExternalCallDataChunk (MemChunk mem2 base2 len2)) -> do
     len_eq <- isEq sym len1 len2
     let ptrW = MC.memWidthNatRepr @ptrW
@@ -408,6 +436,7 @@ printExternalCallData ::
   ExternalCallData sym ptrW ->
   Doc a
 printExternalCallData (ExternalCallDataExpr e) = printSymExpr e
+printExternalCallData (ExternalCallDataPointer ptr) = pretty ptr
 printExternalCallData (ExternalCallDataChunk (MemChunk mem1 base1 len1)) =
   "TODO print mem chunk: " <+> printSymExpr mem1 <+> printSymExpr base1 <+> printSymExpr len1
 
@@ -524,18 +553,18 @@ instance OrdF (SymExpr sym) => Ord (MemEvent sym ptrW) where
   compare a b = case (a,b) of
     (MemOpEvent op1, MemOpEvent op2) -> compare op1 op2
     (SyscallEvent mt1 bv1, SyscallEvent mt2 bv2) -> compareTrees mt1 mt2 <> (toOrdering $ compareF bv1 bv2)
-    (ExternalCallEvent nm1 vs1, ExternalCallEvent nm2 vs2) -> 
-      compare nm1 nm2 <> (compare vs1 vs2)
+    (ExternalCallEventGen nm1 vs1 obs1, ExternalCallEventGen nm2 vs2 obs2) -> 
+      compare nm1 nm2 <> (compare vs1 vs2) <> compare obs1 obs2
     (MemOpEvent{}, _) -> GT
-    (SyscallEvent{}, ExternalCallEvent{}) -> GT
-    (ExternalCallEvent{}, _) -> LT
+    (SyscallEvent{}, ExternalCallEventGen{}) -> GT
+    (ExternalCallEventGen{}, _) -> LT
     (SyscallEvent{}, MemOpEvent{}) -> LT
 
 instance W4S.SerializableExprs sym => W4S.W4Serializable sym (MemEvent sym ptrW) where
   w4Serialize = \case
     MemOpEvent mop -> W4S.object ["mem_op" .= mop]
     SyscallEvent i r0 -> W4S.object ["syscall" .= i, "r0" .== r0]
-    ExternalCallEvent nm bvs -> W4S.object ["external_call" .= nm, "args" .= bvs]
+    ExternalCallEventGen nm bvs obs -> W4S.object ["external_call" .= nm, "args" .= bvs, "observable" .= obs]
 
 prettyMemEvent :: (MemWidth ptrW, IsExpr (SymExpr sym)) => MemEvent sym ptrW -> Doc ann
 prettyMemEvent (MemOpEvent op) = prettyMemOp op
@@ -544,7 +573,7 @@ prettyMemEvent (SyscallEvent i v) =
     [(Just (addr, dis), _)] -> "Syscall At:" <+> viaShow addr <+> pretty dis <> line <> printSymExpr v
     _ -> "Syscall" <+> printSymExpr v
 prettyMemEvent (ExternalCallEvent nm vs) = "External Call At:" <+> pretty nm <+> vsep (map printExternalCallData vs)
-
+prettyMemEvent (ExternalCallEventHidden nm vs) = "Unobservable External Call At:" <+> pretty nm <+> vsep (map printExternalCallData vs)
 
 instance (MemWidth ptrW, IsExpr (SymExpr sym)) => Pretty (MemEvent sym ptrW) where
   pretty ev = prettyMemEvent ev
@@ -555,14 +584,14 @@ instance PEM.ExprMappable sym (MemEvent sym w) where
     SyscallEvent i arg -> SyscallEvent i <$> f arg
     -- MuxTree is unmodified since it has no symbolic expressions
     -- FIXME: shouldn't we still check the booleans?
-    ExternalCallEvent nm vs -> ExternalCallEvent nm <$> PEM.mapExpr sym f vs
+    ExternalCallEventGen nm vs obs -> ExternalCallEventGen nm <$> PEM.mapExpr sym f vs <*> pure obs
 
 instance PEM.ExprFoldable sym (MemEvent sym w) where
   foldExpr sym f ev b = case ev of
     MemOpEvent op -> PEM.foldExpr sym f op b
     -- FIXME: see above
     SyscallEvent _i arg -> f arg b
-    ExternalCallEvent _nm vs -> PEM.foldExpr sym f vs b
+    ExternalCallEventGen _nm vs _obs -> PEM.foldExpr sym f vs b
 
 filterEvent ::
   IsExprBuilder sym =>
@@ -575,7 +604,7 @@ filterEvent sym f x = case x of
     SyscallEvent{} -> return $ (Nothing, truePred sym)
     -- always include external call events
     ExternalCallEvent{} -> return $ (Nothing, truePred sym)
-    
+    ExternalCallEventHidden{} -> return $ (Nothing, falsePred sym)
     -- Include memory operations only if they acutally
     -- happen (their condition is true) and if they are
     -- deemed observable by the given filtering function.

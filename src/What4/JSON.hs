@@ -60,6 +60,7 @@ import qualified Data.Aeson as JSON
 import qualified Data.Aeson.Types as JSON
 import qualified Data.BitVector.Sized as BVS
 import qualified Numeric as N
+import           Data.List ( intercalate )
 
 import           Data.Parameterized.Some (Some(..))
 
@@ -236,6 +237,10 @@ instance sym ~ W4B.ExprBuilder t fs scope => W4Serializable sym (W4B.Expr t tp) 
         v <- case W4.asConcrete e' of
           Just (W4.ConcreteInteger i) -> return $ JSON.toJSON i
           Just (W4.ConcreteBool b) -> return $ JSON.toJSON b
+          Just (W4.ConcreteStruct cs) ->
+            let 
+              strs = TFC.toListFC (\c -> show (W4.ppConcrete c)) cs
+            in return $ JSON.String (T.pack ("(" ++ intercalate ", " strs ++ ")"))
           Just{} -> return $ JSON.String (T.pack (show (W4.printSymExpr e')))
           _ -> do
             sym <- asks w4sSym

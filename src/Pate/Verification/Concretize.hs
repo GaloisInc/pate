@@ -189,4 +189,10 @@ symbolicFromConcrete sym gv e = case WI.exprType e of
   WI.BaseBoolRepr -> let (Concretize _ _ _ inject) = concreteBool in inject sym gv
   WI.BaseIntegerRepr -> let (Concretize _ _ _ inject) = concreteInteger in inject sym gv
   WI.BaseBVRepr w -> let (Concretize _ _ _ inject) = concreteBV w in inject sym gv
+  WI.BaseStructRepr{} -> do
+    es <- Ctx.traverseWithIndex 
+      (\idx_ (WEG.GVW gv_) -> 
+        WI.structField sym e idx_ >>= \e_ -> symbolicFromConcrete sym gv_ e_) 
+      gv
+    WI.mkStruct sym es
   _ -> return e

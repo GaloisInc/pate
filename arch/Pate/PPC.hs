@@ -273,7 +273,7 @@ argumentMapping :: (1 <= SP.AddrWidth v) => PVO.ArgumentMapping (PPC.AnyPPC v)
 argumentMapping = undefined
 
 
-specializedBufferWrite :: forall arch v. (arch ~ PPC.AnyPPC v, 16 <= SP.AddrWidth v, MS.SymArchConstraints arch) => PA.StubOverride arch
+specializedBufferWrite :: forall arch v. (arch ~ PPC.AnyPPC v, PA.ValidArch (PPC.AnyPPC v)) => PA.StubOverride arch
 specializedBufferWrite = 
     PA.mkEventOverride "CFE_SB_TransmitBuffer" mkEvent 0x30 (gpr 3) (gpr 3)
     where
@@ -294,7 +294,7 @@ specializedBufferWrite =
         WI.baseTypeIte sym is_expect expect_value' zero
 
 -- FIXME: flags to make it equal?
-specializeSocketRead :: forall arch v. (Typeable arch, arch ~ PPC.AnyPPC v, 16 <= SP.AddrWidth v, MS.SymArchConstraints arch) => PA.StubOverride arch
+specializeSocketRead :: forall arch v. (arch ~ PPC.AnyPPC v, PA.ValidArch (PPC.AnyPPC v)) => PA.StubOverride arch
 specializeSocketRead = 
     PA.mkReadOverride "OS_SocketRecvFrom" (PPa.PatchPairSingle PB.PatchedRepr (Const f)) addrs lengths (gpr 3) (gpr 4) (gpr 5) (gpr 3)
     where
@@ -308,7 +308,7 @@ specializeSocketRead =
       f = PA.modifyConcreteChunk MC.BigEndian WI.knownNat (0x300 :: Integer) 2 4
 
 -- FIXME: clagged directly from ARM, registers may not be correct
-stubOverrides :: (Typeable (PPC.AnyPPC v), MS.SymArchConstraints (PPC.AnyPPC v), 1 <= SP.AddrWidth v, 16 <= SP.AddrWidth v) => PA.ArchStubOverrides (PPC.AnyPPC v)
+stubOverrides :: PA.ValidArch (PPC.AnyPPC v) => PA.ArchStubOverrides (PPC.AnyPPC v)
 stubOverrides = PA.ArchStubOverrides (PA.mkDefaultStubOverride "__pate_stub" r3 ) $ \fs ->
   lookup (PBl.fnSymBase fs) override_list
   where

@@ -128,6 +128,7 @@ import Data.Maybe
 import Pate.Memory
 import qualified Pate.ExprMappable as PEM
 import Control.Monad (forM)
+import qualified Pate.Pointer as Ptr
 
 -- | The type of architecture-specific dedicated registers
 --
@@ -341,20 +342,18 @@ defaultStubOverride va = let ArchStubOverrides _default _ = validArchStubOverrid
 --   restrictions on the size of regions.
 mkMallocOverride ::
   forall arch.
-  16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ length argument (unused currently ) -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ register for fresh pointer -} ->
   StubOverride arch
 mkMallocOverride _rLen rOut = mkStubOverride $ \sym st -> do
   (fresh_ptr, st') <- freshAlloc sym Nothing st
-  return (st' { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ fresh_ptr) })
+  updateRegister sym rOut fresh_ptr st'
 
 mkMallocOverride' ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
-  Typeable arch =>
+  ValidArch arch =>
   Maybe (MemLocation (MC.ArchAddrWidth arch)) ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ write fresh pointer here -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ register for fresh pointer -} ->
@@ -382,7 +381,7 @@ mkMallocOverride' bufOverride rPtrLoc rOut = StubOverride $ \sym archInfo _wsolv
     nullPtr <- IO.liftIO $ CLM.mkNullPointer sym w_mem
 
     ptr' <- IO.liftIO $ PMT.muxPtr sym alloc_success (PSR.macawRegValue fresh_ptr) nullPtr
-    return (st' { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ (PSR.ptrToEntry ptr')) })
+    updateRegister sym rOut (PSR.ptrToEntry ptr') st'
 
   -- | Return a freshly-allocated pointer with an optional region override.
 --   New max region is set to the given region + 1 if it is greater than the current max
@@ -422,17 +421,15 @@ freshAlloc sym mregion st = do
 --  but provably equal between the programs provided they happen in the same order.
 mkClockOverride ::
   forall arch.
-  16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
 mkClockOverride rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol "current_time") (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
-    zero_nat <- W4.natLit sym 0
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
-    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+    val <- PSR.bvToEntry sym fresh_bv
+    updateRegister sym rOut val st
 
 applyConcreteOverride :: 
   LCB.IsSymInterface sym =>
@@ -456,7 +453,7 @@ applyConcreteOverride sym bin overridePair e = case PPa.getC bin overridePair of
 mkObservableOverride ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   T.Text {- ^ name of call -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return -} ->
   [MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch))] {- ^ args -} ->
@@ -475,17 +472,15 @@ mkObservableOverride nm return_reg arg_regs = StubOverride $ \sym _archInfo _wso
     bv_fn <- W4U.mkUninterpretedSymFn sym ("written_" ++ show nm) reprsCtx (W4.BaseBVRepr w_mem)
 
     let mem = PS.simMem st
-    mem' <- PMT.addExternalCallEvent sym nm argsCtx mem
-    let st' = st { PS.simMem = mem' }
-    zero_nat <- W4.natLit sym 0
+    mem' <- PMT.addExternalCallEvent sym nm argsCtx True mem 
     fresh_bv <- W4.applySymFn sym bv_fn argsCtx
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
-    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue return_reg) .~ ptr ) })
+    val <- PSR.bvToEntry sym fresh_bv
+    updateRegister sym return_reg val (st { PS.simMem = mem' })
 
 mkEventOverride ::
   forall arch ptrW.
   16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   ptrW ~ (MC.ArchAddrWidth arch) =>
   T.Text {- ^ name of call -} ->
   (forall sym. LCB.IsSymInterface sym => sym -> PMT.MemChunk sym ptrW -> IO (W4.SymBV sym ptrW)) {- ^ compute return value for read chunk -} ->
@@ -507,10 +502,9 @@ mkEventOverride nm readChunk len buf_reg rOut = StubOverride $ \(sym :: sym) _ar
   len_sym <- W4.bvLit sym ptrW (BVS.mkBV ptrW (fromIntegral len))
   bytes_chunk <- PMT.readChunk sym (PMT.memState mem) buf_ptr len_sym
   written <- readChunk sym bytes_chunk
-  mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> written) mem
-  result <- PSR.bvToEntry sym written 
-  return (st' { PS.simMem = mem', PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ result ) })
-
+  mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> written) True mem
+  result <- PSR.bvToEntry sym written
+  updateRegister sym rOut result (st' { PS.simMem = mem' })
 
 newtype MemChunkModify ptrW =
   MemChunkModify { mkMemChunk :: (forall sym. LCB.IsSymInterface sym => sym -> PMT.MemChunk sym ptrW -> IO (PMT.MemChunk sym ptrW)) }
@@ -616,8 +610,7 @@ resolveMemLocation sym mem endianness loc  = case loc of
 mkReadOverride ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
-  Typeable arch =>
+  ValidArch arch =>
   T.Text {- ^ name of call -} ->
   PPa.PatchPairC (MemChunkModify (MC.ArchAddrWidth arch)) {- ^ mutator for incoming symbolic data -} ->
   PPa.PatchPairC (Maybe (MemLocation (MC.ArchAddrWidth arch))) {- ^ concrete override for buffer address (pointer to buffer pointer) -} ->
@@ -711,7 +704,7 @@ mkReadOverride nm chunkOverrides bufferOverrides lenOverrides src_reg buf_reg le
 readTransformer ::
   forall sym arch bin v.
   16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   LCB.IsSymInterface sym =>
   sym ->
   MI.ArchitectureInfo arch ->
@@ -736,17 +729,16 @@ readTransformer sym archInfo _src_val buf rOut cond chunk st = do
   zero <- IO.liftIO $ W4.bvLit sym ptrW (BVS.zero ptrW)
   -- either the chunk is written or it's not and we return zero bytes written
   written <- IO.liftIO $ W4.baseTypeIte sym cond (PMT.memChunkLen chunk) zero
-  zero_nat <- IO.liftIO $ W4.natLit sym 0
-  let written_result = PSR.ptrToEntry (CLM.LLVMPointer zero_nat written)
+  written_result <- PSR.bvToEntry sym written
   -- FIXME: currently these are all unsigned values, but likely this return value will be treated as signed
   -- where negative values represent different error conditions
-  return (st { PS.simMem = mem', PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ written_result ) })
+  updateRegister sym rOut written_result (st { PS.simMem = mem' })
 
 --  SymExpr sym (BaseArrayType (Ctx.EmptyCtx Ctx.::> BaseBVType ptrW) (BaseBVType 8))
 mkWriteOverride ::
   forall arch.
   16 <= MC.ArchAddrWidth arch =>
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   T.Text {- ^ name of call -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ fd -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ buf -} ->
@@ -770,7 +762,7 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym archInfo wsolv
         -- endianness doesn't really matter, as long as we're consistent
         let memrepr = MC.BVMemRepr w (MI.archEndianness archInfo)
         (CLM.LLVMPointer region val_bv) <- PMT.readMemState sym (PMT.memState mem) (PMT.memBaseMemory mem) buf_ptr memrepr
-        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv Ctx.:> W4.natToIntegerPure region) mem
+        mem' <- PMT.addExternalCallEvent sym nm (Ctx.empty Ctx.:> fd_bv Ctx.:> val_bv Ctx.:> W4.natToIntegerPure region) True mem
         -- globally-unique
         bv_fn <- W4U.mkUninterpretedSymFn sym (show nm ++ "sz") (Ctx.empty Ctx.:> (W4.exprType val_bv)) (W4.BaseBVRepr w_mem)
         sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> val_bv)
@@ -793,21 +785,31 @@ mkWriteOverride nm fd_reg buf_reg flen rOut = StubOverride $ \sym archInfo wsolv
         sz <- W4.applySymFn sym bv_fn (Ctx.empty Ctx.:> len_bv Ctx.:> first_byte Ctx.:> last_byte)
         return $ (st { PS.simMem = mem' },sz)
 
-    zero_nat <- W4.natLit sym 0
     -- we're returning a symbolic result representing the number of bytes written, so
     -- we clamp this explicitly to the given write length
     zero_ptr <- W4.bvLit sym w_mem (BVS.mkBV w_mem 0)
     sz_is_bounded <- W4.bvUle sym len_bv' sz
     bounded_sz <- W4.baseTypeIte sym sz_is_bounded sz zero_ptr
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat bounded_sz)
-    return (st' { PS.simRegs = ((PS.simRegs st') & (MC.boundValue rOut) .~ ptr ) })
+    val <- IO.liftIO $ PSR.bvToEntry sym bounded_sz
+    updateRegister sym rOut val st'
 
-
+updateRegister ::
+  IO.MonadIO m =>
+  LCB.IsSymInterface sym =>
+  ValidArch arch =>
+  sym ->
+  MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) ->
+  PSR.MacawRegEntry sym (MT.BVType (MC.ArchAddrWidth arch)) ->
+  PS.SimState sym arch bin v ->
+  m (PS.SimState sym arch bin v)
+updateRegister sym rOut val st = do
+  mem' <- IO.liftIO $ PMT.addRegEvent sym (PMT.RegOp $ MapF.singleton rOut val) (PS.simMem st)
+  return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ val), PS.simMem = mem' }) 
 
 -- | Default override returns the same arbitrary value for both binaries
 mkDefaultStubOverride ::
   forall arch.
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   String -> 
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
@@ -815,26 +817,25 @@ mkDefaultStubOverride nm rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
   fresh_bv <- W4.freshConstant sym (W4.safeSymbol nm) (W4.BaseBVRepr w)
   return $ StateTransformer $ \st -> do
-    zero_nat <- W4.natLit sym 0
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
-    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+    val <- PSR.bvToEntry sym fresh_bv
+    updateRegister sym rOut val st
 
 -- | Default override returns the same arbitrary value for both binaries
 mkArgPassthroughOverride ::
   forall arch.
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ argument register -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
   StubOverride arch
-mkArgPassthroughOverride rArg rOut = StubOverride $ \_ _ _ -> return $ StateTransformer $ \st -> do
+mkArgPassthroughOverride rArg rOut = StubOverride $ \sym _ _ -> return $ StateTransformer $ \st -> do
   let arg = (PS.simRegs st) ^. MC.boundValue rArg
-  return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ arg) })
+  updateRegister sym rOut arg st
 
 -- | Default override returns the same arbitrary value for both binaries, based on the input
 --   registers
 mkDefaultStubOverrideArg ::
   forall arch.
-  MS.SymArchConstraints arch =>
+  ValidArch arch =>
   String ->
   [Some (MC.ArchReg arch)] {- ^ argument registers -} ->
   MC.ArchReg arch (MT.BVType (MC.ArchAddrWidth arch)) {- ^ return register -} ->
@@ -843,27 +844,37 @@ mkDefaultStubOverrideArg nm rArgs rOut = StubOverride $ \sym _ _ -> do
   let w = MC.memWidthNatRepr @(MC.ArchAddrWidth arch)
 
   return $ StateTransformer $ \st -> do
-    zero_nat <- W4.natLit sym 0
-    vals <- mapM (\(Some r) -> getType sym (PS.simRegs st ^. MC.boundValue r)) rArgs
-    Some vals_ctx <- return $ Ctx.fromList vals
+    datas <- concat <$> mapM (\(Some r) -> getType sym (PS.simRegs st ^. MC.boundValue r)) rArgs
+    dataExprs <- PEM.foldExpr sym (\e_ es_ -> return (Some e_:es_)) datas [] 
+    Some vals_ctx <- return $ Ctx.fromList (reverse dataExprs)
     -- globally unique function
     result_fn <- W4U.mkUninterpretedSymFn sym nm (TFC.fmapFC W4.exprType vals_ctx) (W4.BaseBVRepr w)
     fresh_bv <- W4.applySymFn sym result_fn vals_ctx
-    let ptr = PSR.ptrToEntry (CLM.LLVMPointer zero_nat fresh_bv)
-    return (st { PS.simRegs = ((PS.simRegs st) & (MC.boundValue rOut) .~ ptr) })
+    let mem0 = PS.simMem st
+    -- add unobservable event, so this call appears in the trace
+    mem1 <- case fromRegisterDisplay (displayRegister rOut) of
+      Just rOutNm -> do
+        -- TODO: this is a quick solution to indicate where the result of
+        -- the call was saved. Ideally there would be a formal slot in the
+        -- event to store this information.
+        let nm' = rOutNm ++ " <- " ++ nm
+        IO.liftIO $ PMT.addMemEvent sym (PMT.ExternalCallEventHidden (T.pack nm') datas) mem0
+      Nothing -> IO.liftIO $ PMT.addMemEvent sym (PMT.ExternalCallEventHidden (T.pack nm) datas) mem0
+    val <- IO.liftIO $ PSR.bvToEntry sym fresh_bv
+    updateRegister sym rOut val (st { PS.simMem = mem1 })
+
   where
     getType :: 
       W4.IsExprBuilder sym => 
       sym -> 
       PSR.MacawRegEntry sym tp -> 
-      IO (Some (W4.SymExpr sym))
-    getType sym r = case PSR.macawRegRepr r of
-      CLM.LLVMPointerRepr{} -> do
-        let CLM.LLVMPointer reg off = PSR.macawRegValue r
-        let iRegion = W4.natToIntegerPure reg
-        Some <$> W4.mkStruct sym (Ctx.empty Ctx.:> iRegion Ctx.:> off)
-      LCT.BoolRepr -> return $ Some $ PSR.macawRegValue r
-      LCT.StructRepr Ctx.Empty -> Some <$> W4.mkStruct sym Ctx.empty
+      IO [PMT.ExternalCallData sym (MC.ArchAddrWidth arch)]
+    getType _sym r = case PSR.macawRegRepr r of
+      CLM.LLVMPointerRepr{} -> 
+        return $ [PMT.ExternalCallDataPointer (Ptr.fromLLVMPointer $ PSR.macawRegValue r )]
+
+      LCT.BoolRepr -> return $ [PMT.ExternalCallDataExpr $ PSR.macawRegValue r]
+      LCT.StructRepr Ctx.Empty -> return []
       x -> error $ "mkDefaultStubOverrideArg: unsupported type" ++ show x
 
 -- | No-op stub

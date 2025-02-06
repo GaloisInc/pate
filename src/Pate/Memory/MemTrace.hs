@@ -67,6 +67,7 @@ module Pate.Memory.MemTrace
 , prettyMemTraceSeq
 , addExternalCallEvent
 , addExternalCallWrite
+, addMemEvent
 , SymBV'(..)
 , getPtrAssertion
 , PtrAssertions
@@ -641,11 +642,12 @@ addExternalCallEvent ::
   sym ->
   Text {- ^ name of the external call -} ->
   Ctx.Assignment (SymExpr sym) ctx {- ^ data relevant to the call -} ->
+  Bool {- ^ true if this call is considered observable -} ->
   MemTraceImpl sym ptrW ->
   IO (MemTraceImpl sym ptrW)
-addExternalCallEvent sym nm data_ mem = do
+addExternalCallEvent sym nm data_ obs mem = do
   let
-    event = ExternalCallEvent nm (TFC.toListFC ExternalCallDataExpr data_)
+    event = ExternalCallEventGen nm (TFC.toListFC ExternalCallDataExpr data_) obs
   addMemEvent sym event mem
 
 addExternalCallWrite ::

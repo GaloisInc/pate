@@ -931,12 +931,13 @@ propagateOne ::
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
   [ConditionKind] -> {- ^ weaken the propagated condition with assumptions -}
+  AbstractDomain sym arch v -> {- ^ predomain -}
   GraphNode arch {- ^ from -} ->
   GraphNode arch {- ^ to -} ->
   ConditionKind ->
   PairGraph sym arch ->
   EquivM sym arch (PropagateCase, PairGraph sym arch)
-propagateOne scope bundle preconds from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
+propagateOne scope bundle preconds preD from to condK gr0 = withSym $ \sym -> case getCondition gr0 to condK of
   Nothing -> do
     emitTrace @"debug" "No condition to propagate"
     return (ConditionNotPropagated, gr0)
@@ -954,15 +955,36 @@ propagateOne scope bundle preconds from to condK gr0 = withSym $ \sym -> case ge
     cond_pred <- PEC.toPred sym cond
 
     goalTimeout <- CMR.asks (PC.cfgGoalTimeout . envConfig)
-    isPredSat' goalTimeout cond_pred >>= \case
+    mcond_res <- isPredSat' goalTimeout cond_pred
+    mcheck_propagate <- case mcond_res of
       Just False -> do
         emitTrace @"message" "Condition is infeasible, dropping branch."
         gr1 <- pruneCurrentBranch scope (from,to) condK gr0
-        return (ConditionInfeasible, gr1)
-      _ | not (shouldPropagate (getPropagationKind gr0 to condK)) -> do
-        emitTrace @"debug" "Condition not propagated"
-        return (ConditionNotPropagated, gr0)
-      _ -> do
+        return $ Just (ConditionInfeasible, gr1)
+      _ -> case shouldPropagate (getPropagationKind gr0 to condK) of
+        True -> return Nothing
+        False -> do
+          eqCtx <- equivalenceContext
+          (postAsm_1:postAsms_rest) <- mapM (\condK_ -> getEquivPostCondition scope bundle to condK_ gr0) [minBound..maxBound]
+          postAsm <- PEC.toPred sym =<< foldM (PEC.merge sym) postAsm_1 postAsms_rest
+
+          eqPost_eq <- liftIO $ PEq.getPostdomain sym scope bundle eqCtx (PAD.absDomEq preD) (universalDomain sym)
+          eqPost_pred <- IO.liftIO $ postCondPredicate sym eqPost_eq
+          not_eqPost <- liftIO $ W4.notPred sym eqPost_pred
+          (withSatAssumption (PAs.fromPred postAsm) $ isPredSat' goalTimeout not_eqPost) >>= \case
+            Just (Just False) -> do
+              -- post-domain assumes exact equality, so we stop propagating assumed conditions
+              emitTrace @"debug" "Condition not propagated"
+              return $ Just (ConditionNotPropagated, gr0)
+            _ -> do
+              withTracing @"debug" "Non-trivial equivalence post-domain:" $ 
+                emitTrace @"expr" (Some eqPost_pred) 
+              -- domain is non-trivial, so we propagate the assumption backwards since
+              -- it may strengthen the condition
+              return Nothing
+    case mcheck_propagate of
+      Just res -> return res
+      Nothing -> do
         not_cond <- liftIO $ W4.notPred sym cond_pred
         isPredSat' goalTimeout not_cond >>= \case
           -- equivalence condition for this path holds, we 
@@ -1016,11 +1038,12 @@ propagateCondition ::
   forall sym arch v.
   PS.SimScope sym arch v ->
   SimBundle sym arch v ->
+  AbstractDomain sym arch v -> {- ^ predomain -}
   GraphNode arch {- ^ from -} ->
   GraphNode arch {- ^ to -} ->
   PairGraph sym arch ->
   EquivM sym arch (PropagateCase, PairGraph sym arch)
-propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
+propagateCondition scope bundle preD from to gr0 = fnTrace "propagateCondition" $ do
   priority <- thisPriority
   (pcases, gr1) <- go [] [ConditionAssumed, ConditionEquiv, ConditionAsserted] gr0
   let used = nub $ foldr (\pc used_ -> case pc of ConditionPropagated used' -> used_ ++ used'; _ -> used) [] pcases
@@ -1059,7 +1082,7 @@ propagateCondition scope bundle from to gr0 = fnTrace "propagateCondition" $ do
   where
     go _ [] gr = return ([],gr)
     go preconds (condK:conds) gr =  do
-      (pcase, gr') <- propagateOne scope bundle preconds from to condK gr
+      (pcase, gr') <- propagateOne scope bundle preconds preD from to condK gr
       case pcase of
         -- we need to collect any non-propagated conditions so that
         -- propagated conditions are weakened with them
@@ -1112,7 +1135,7 @@ widenAlongEdge ::
 widenAlongEdge scope bundle from d gr0 to = withSym $ \sym -> do
   gr1 <- addRefinementChoice to gr0
   priority <- thisPriority
-  propagateCondition scope bundle from to gr1 >>= \case
+  propagateCondition scope bundle d from to gr1 >>= \case
     (ConditionPropagated{}, gr2) -> do
       -- since this 'to' edge has propagated backwards
       -- an equivalence condition, we need to restart the analysis

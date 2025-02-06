@@ -38,6 +38,8 @@ expect "Handle observable difference:"
 expect "4: Avoid difference with equivalence condition"
 expect "?>"
 send "4\r"
+send "top\r"
+send "wait\r"
 
 expect "Continue verification?"
 expect "0: Finish and view final result"
@@ -53,29 +55,29 @@ expect "Waiting for constraints.."
 # error about a missing identifier. The target expression should be the one that ends in 
 # something like: 'select v35113 (bvSum cr5O_offset@34733:bv 0x2:[32]))'
 
-send "input \"\[ \[ { \\\"var\\\" : { \\\"symbolic_ident\\\" : 17460 }, \\\"op\\\" : \\\"EQ\\\", \\\"const\\\" : \\\"128\\\"} \] \]\"\r"
+send "input \"\[ \[ { \\\"var\\\" : { \\\"symbolic_ident\\\" : 11458 }, \\\"op\\\" : \\\"EQ\\\", \\\"const\\\" : \\\"128\\\"} \] \]\"\r"
 
 expect "Regenerate result with new trace constraints?"
 expect "1: False"
 send "1\r"
 
 
-expect "20: Final Result"
+expect "30: Final Result"
 expect ">"
-send "20\r"
+send "30\r"
 
 expect "0: Assumed Equivalence Conditions"
-expect "2: Binaries are conditionally, observably equivalent"
+expect "3: Binaries are conditionally, observably equivalent"
 expect ">"
 send "0\r"
 
 # Inspect the specific equivalence condition
 
-expect "0: segment1+0x71c \\\[ via: \"parse_packet\" (segment1+0x590) \\\]"
+expect "1: segment1+0x71c \\\[ via: \"parse_packet\" (segment1+0x590) \\\]"
 expect ">"
-send "0\r"
+send "1\r"
 
-expect -re {3: \(Predicate\) let -- segment1\+0x754.. in not \(and v(\d)+ \(not v(\d)+\)\)}
+expect -re {3: \(Predicate\) let -- segment1\+0x734.. in not \(and v(\d)+ \(not v(\d)+\)\)}
 expect ">"
 send "3\r"
 
@@ -88,18 +90,18 @@ expect ">"
 send "up\r"
 expect ">"
 send "up\r"
-expect "5: Assumed Equivalence Conditions"
+expect "6: Assumed Equivalence Conditions"
 expect ">"
-send "5\r"
+send "6\r"
 
-expect "0: segment1+0x71c \\\[ via: \"parse_packet\" (segment1+0x590) \\\]"
+expect "1: segment1+0x71c \\\[ via: \"parse_packet\" (segment1+0x590) \\\]"
 expect ">"
-send "0\r"
+send "1\r"
 
 expect "5: Simplified Predicate"
 send "5\r"
 
-expect "0: eq 0x0:\\\[8\\\] (select (select cInitMemBytes@49845:a 0) 0x11044:\\\[32\\\])"
+expect -re {0: let -- segment1\+0x734.. in not \(and v(\d)+ \(not v(\d)+\)\)}
 
 send "\x04" ; # Ctrl-D (EOF)
 
