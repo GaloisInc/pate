@@ -29,23 +29,9 @@ Instantiations for the leaves of the proof types
 
 module Pate.Proof.Instances
   ( SomeProofNonceExpr(..)
-  , GroundBV(..)
-  , groundBV
-  , mkGroundBV
-  , groundBVAsPointer
-  , ConcreteValue
-  , GroundLLVMPointer(..)
-  , GroundBlockExit(..)
-  , groundBlockEnd
-  , GroundMacawValue(..)
-  , groundMacawValue
   , cellInGroundDomain
   , regInGroundDomain
-  , ppLLVMPointer
-  , ppInequivalencePreRegs
   , ppExitCase
-  , ppGroundCell
-  , isGroundBVZero
   )
   
   where
@@ -102,13 +88,6 @@ data SomeProofNonceExpr (arch :: DK.Type) tp where
 
 instance Show (SomeProofNonceExpr arch tp) where
   show (SomeProofNonceExpr (PSo.Sym{}) e) = show (PP.pretty (PF.unNonceProof e))
-
-ppInequivalencePreRegs ::
-  PF.InequivalenceResult arch -> String
-ppInequivalencePreRegs gineq = PF.withIneqResult gineq $ \ineq ->
-  show $ ppRegs (PF.ineqPre ineq) (PF.slRegState $ PF.slBlockPreState (PF.ineqSlice ineq))
-
-
 
 ppMaybe :: Maybe f -> (f ->  PP.Doc a) -> PP.Doc a
 ppMaybe (Just f) pp = pp f
@@ -598,7 +577,6 @@ ppGroundCell ::
   PMC.MemCell grnd arch n ->
   PP.Doc a
 ppGroundCell cell = PP.pretty $ (show $ groundLLVMPointer (PMC.cellPtr cell))
-
 
 eqGroundMemCells ::
   PG.IsGroundSym grnd =>
