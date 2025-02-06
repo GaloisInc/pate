@@ -18,8 +18,6 @@ Functions for creating and operating with equivalence proofs
 
 module Pate.Proof.Operations
   ( simBundleToSlice
-  , noTransition
-  , proofResult
   ) where
 
 import qualified Control.Monad.Reader as CMR
@@ -37,19 +35,14 @@ import qualified Lang.Crucible.Simulator as CS
 
 import qualified What4.Interface as W4
 
-import qualified Pate.Block as PB
-import qualified Pate.Discovery as PD
 import qualified Pate.Equivalence as PE
 import qualified Pate.Equivalence.MemoryDomain as PEM
-import qualified Pate.Equivalence.EquivalenceDomain as PED
 import qualified Pate.Event as PE
 import qualified Pate.MemCell as PMC
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
-import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Proof as PF
-import qualified Pate.Proof.Instances as PFI
 import qualified Pate.Register.Traversal as PRt
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
@@ -109,50 +102,3 @@ simBundleToSlice scope bundle = withSym $ \sym -> do
         , PF.slMemOpEquiv = isEquiv
         , PF.slMemOpCond = cond
         }
-
--- | Compute an aggregate verification condition: preferring an inequivalence result
--- if it exists, but potentially yielding an 'PF.Unverified' result.
-proofResult ::
-  forall sym arch tp.
-  PF.ProofExpr sym arch tp ->
-  PF.VerificationStatus sym arch
-proofResult e = foldr merge PF.VerificationSuccess statuses
-  where
-    merge ::
-      PF.VerificationStatus sym arch ->
-      PF.VerificationStatus sym arch ->
-      PF.VerificationStatus sym arch
-    merge a@PF.VerificationFail{} _ = a
-    merge _ b@PF.VerificationFail{} = b
-    merge PF.Unverified _ = PF.Unverified
-    merge _ PF.Unverified = PF.Unverified
-    merge PF.VerificationSkipped a = a
-    merge a PF.VerificationSkipped = a
-    merge PF.VerificationSuccess PF.VerificationSuccess = PF.VerificationSuccess
-    
-    statuses :: [PF.VerificationStatus sym arch]
-    statuses = PF.collectProofExpr go e
-
-    go :: PF.ProofExpr sym arch tp' -> [PF.VerificationStatus sym arch]
-    go (PF.ProofExpr (PF.ProofStatus st)) = [st]
-    go _ = []
-
-noTransition ::
-  PS.SimScope sym arch v ->
-  PPa.PatchPair (PS.SimInput sym arch v) ->
-  CS.RegValue sym (MCS.MacawBlockEndType arch) ->
-  EquivM sym arch (PF.BlockSliceTransition sym arch)
-noTransition scope stIn blockEnd = do
-  let
-    stOut = PPa.map (\st -> PS.SimOutput (PS.simInState st) blockEnd) stIn
-    bundle = PS.SimBundle stIn stOut
-  simBundleToSlice scope bundle
-
-proofNonceExpr ::
-  EquivM sym arch (PF.ProofNonceApp sym arch tp) ->
-  EquivM sym arch (PF.ProofNonceExpr sym arch tp)
-proofNonceExpr f = do
-  parentNonce <- CMR.asks envParentNonce
-  withProofNonce $ \nonce -> do
-    app <- f
-    return $ PF.ProofNonceExpr nonce parentNonce app
