@@ -115,7 +115,6 @@ library
                        Pate.Verification.Domain,
                        Pate.Verification.ExternalCall,
                        Pate.Verification.FnBindings,
-                       Pate.Verification.InlineCallee,
                        Pate.Verification.MemoryLog,
                        Pate.Verification.Override,
                        Pate.Verification.Override.Library,
