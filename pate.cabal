@@ -187,15 +187,8 @@ library
                        Pate.Equivalence.EquivalenceDomain,
                        Pate.Equivalence.Statistics,
                        Pate.Verbosity,
-                       Pate.PatchPair,
+                       Pate.PatchPair
 
-                       Pate.Interactive,
-                       Pate.Interactive.Port,
-                       Pate.Interactive.Render.BlockPairDetail,
-                       Pate.Interactive.Render.Console,
-                       Pate.Interactive.Render.Proof,
-                       Pate.Interactive.Render.SliceGraph,
-                       Pate.Interactive.State
   other-modules:       Compat.Aeson
 
 common shared-test
