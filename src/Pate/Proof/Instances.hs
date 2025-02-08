@@ -29,8 +29,6 @@ Instantiations for the leaves of the proof types
 
 module Pate.Proof.Instances
   ( SomeProofNonceExpr(..)
-  , cellInGroundDomain
-  , regInGroundDomain
   , ppExitCase
   )
   

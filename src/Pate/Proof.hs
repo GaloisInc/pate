@@ -34,10 +34,7 @@ Representation and presentation of the equivalence proofs
 module Pate.Proof
   ( VerificationStatus(..)
   , ProofApp(..)
-  , traverseProofApp
-  , mapProofApp
   , ProofNonce(..)
-  , proofNonceValue
   , ProofNonceExpr(..)
   , ProofNonceApp
   , unNonceProof
@@ -140,7 +137,7 @@ withIneqResult ::
   InequivalenceResult arch ->
   (forall grnd. PA.ValidArch arch => PG.IsGroundSym grnd => InequivalenceResultSym arch grnd -> a) ->
   a
-withIneqResult ineq f = PG.withGroundSym ineq $ \ineq'@InequivalenceResultSym{} -> f ineq'
+withIneqResult ineq f = error "remove this function"
 
 data CondEquivalenceResult sym arch where
   CondEquivalenceResult :: PA.ValidArch arch =>
@@ -263,44 +260,6 @@ data ProofApp sym arch (node :: ProofNodeType -> DK.Type) (tp :: ProofNodeType) 
   ProofDomain :: PED.EquivalenceDomain sym arch -> ProofApp sym arch node ProofDomainType
   ProofStatus :: VerificationStatus sym arch -> ProofApp sym arch node ProofStatusType
 
--- | Traverse the nodes of a 'ProofApp', changing the
--- recursive 'node' type while leaving the leaves unchanged.
-traverseProofApp ::
-  Applicative m =>
-  (forall tp. node tp -> m (node' tp)) ->
-  ProofApp sym arch node utp ->
-  m ((ProofApp sym arch node') utp)
-traverseProofApp f = \case
-  ProofBlockSlice a1 a2 a3 a4 a5 -> ProofBlockSlice
-    <$> f a1
-    <*> traverse (\(blks,v) -> (,) <$> pure blks <*> f v) a2
-    <*> traverse f a3
-    <*> traverse f a4
-    <*> pure a5
-  ProofInlinedCall a1 a2 -> ProofInlinedCall
-    <$> pure a1
-    <*> pure a2
-  ProofFunctionCall a1 a2 a3 md -> ProofFunctionCall
-    <$> f a1
-    <*> f a2
-    <*> traverse f a3
-    <*> pure md
-  ProofTriple a1 a2 a3 a4 -> ProofTriple
-    <$> pure a1
-    <*> f a2
-    <*> f a3
-    <*> f a4
-  ProofDomain a1 -> ProofDomain <$> pure a1
-  ProofStatus a1 -> ProofStatus <$> pure a1
-
--- | Map over the nodes of a 'ProofApp', changing the
--- 'node' type while leaving the leaves unchanged.
-mapProofApp ::
-  (forall tp. node tp -> node' tp) ->
-  ProofApp sym arch node utp ->
-  ProofApp sym arch node' utp
-mapProofApp f app = runIdentity $ traverseProofApp (\app' -> Identity $ f app') app
-
 -- | A 'ProofExpr' is an direct proof representation, where
 -- nodes hold completed sub-proofs.
 data ProofExpr sym arch tp where
@@ -324,9 +283,6 @@ instance TestEquality (ProofNonce sym) where
 instance OrdF (ProofNonce prf) where
   compareF (ProofNonce n1) (ProofNonce n2) = compareF n1 n2
 
-proofNonceValue :: ProofNonce sym tp -> Natural
-proofNonceValue (ProofNonce n) = fromIntegral (N.indexValue n)
-
 -- | A proof expression that encoding the tree structure of the proof by annotating
 -- each node with a unique nonce, and the nonce of its parent.
 data ProofNonceExpr sym arch tp where
@@ -340,7 +296,7 @@ type ProofNonceApp sym arch tp = ProofApp sym arch (ProofNonceExpr sym arch) tp
 
 -- | Strip the nonces from a 'ProofNonceExpr', yielding an equivalent 'ProofExpr'.
 unNonceProof :: ProofNonceExpr sym arch tp -> ProofExpr sym arch tp
-unNonceProof prf = ProofExpr $ mapProofApp unNonceProof (prfNonceBody prf)
+unNonceProof prf = error "remove this function"
 
 -- | The semantics of executing two block slices: an original and a patched variant.
 data BlockSliceTransition sym arch where
