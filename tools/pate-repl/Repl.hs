@@ -696,6 +696,13 @@ goto' idx = do
       Just (SomeChoice c) -> do
         IO.liftIO $ choicePick c
         (IO.liftIO $ IO.threadDelay 100)
+        let untilReady = do
+              headerReady <- choiceReady $ choiceHeader c
+              choiceReady <- choiceChosen c
+              if headerReady && choiceReady then
+                return ()
+              else IO.threadDelay 100 >> untilReady
+        IO.liftIO $ untilReady
         Some curNode <- currentNode
         top'
         IO.liftIO $ wait

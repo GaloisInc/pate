@@ -884,6 +884,9 @@ data Choice k (nm_choice :: Symbol) a =
          , choicePick :: IO ()
          -- ^ executed by some interactive client to indicate
          -- this is the desired choice
+         -- FIXME: this needs to coordinate with the 'ChoiceHeader' to ensure
+         -- that 'choiceReady' will necessarily return 'True' once 
+         -- this function unblocks
          , choiceChosen :: IO Bool
          -- ^ returns True if this is the desired choice
          }
