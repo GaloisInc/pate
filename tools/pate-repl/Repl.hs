@@ -155,7 +155,22 @@ data ReplIOStore =
 data LoadOpts = LoadOpts { loadJSONMode :: Bool }
 
 newtype ReplM_ sym arch a = ReplM_ { unReplM :: (StateT (ReplState sym arch) IO a) }
-  deriving ( Functor, Applicative, Monad, MonadState (ReplState sym arch), IO.MonadIO )
+  deriving ( Functor, Applicative, Monad, MonadState (ReplState sym arch), IO.MonadIO)
+
+-- | Same as 'IO.liftIO' but ensures that the global 'ref' representing
+--   the current state is consistent with the state of 'ReplM'
+liftIO_State :: IO a -> ReplM sym arch a
+liftIO_State f = ReplM_ $ do
+    st <- get
+    ValidSymArchRepr{} <- return $ replValidRepr st
+    (IO.liftIO $ IO.readIORef ref) >>= \case
+      NoTreeLoaded -> fail "Inconsistent verifier state: no initial state"
+      SomeReplState tid _ ->  do
+        IO.liftIO $ IO.writeIORef ref (SomeReplState tid st)
+        a <- IO.liftIO f
+        (IO.liftIO $ IO.readIORef ref) >>= \case
+          SomeReplState _ st' -> put (unsafeCoerce st') >> return a
+          NoTreeLoaded -> fail "Inconsistent verifier state: lost state"
 
 type ReplM sym arch a = (PA.ValidArch arch, PS.ValidSym sym) => ReplM_ sym arch a
 
@@ -696,16 +711,9 @@ goto' idx = do
       Just (SomeChoice c) -> do
         IO.liftIO $ choicePick c
         (IO.liftIO $ IO.threadDelay 100)
-        let untilReady = do
-              headerReady <- choiceReady $ choiceHeader c
-              choiceReady <- choiceChosen c
-              if headerReady && choiceReady then
-                return ()
-              else IO.threadDelay 100 >> untilReady
-        IO.liftIO $ untilReady
         Some curNode <- currentNode
         top'
-        IO.liftIO $ wait
+        liftIO_State $ wait
         (Just <$> currentNode)
       Nothing -> do
         goto_node' nextNode
@@ -812,7 +820,7 @@ input' s = withCurrentNode $ \tr -> asInput tr >>= \case
     Nothing -> do
       IO.liftIO $ IO.threadDelay 100
       top'
-      IO.liftIO $ wait
+      liftIO_State $ wait
       return Nothing
     Just err -> return $ Just err
   Nothing -> return $ Just (InputChoiceError "Not an input prompt" [])
