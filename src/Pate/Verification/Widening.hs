@@ -89,7 +89,6 @@ import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEMd
 import qualified Pate.Proof.Operations as PP
 import qualified Pate.Proof.CounterExample as PP
-import qualified Pate.Proof.Instances ()
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.Simplify as PSi
