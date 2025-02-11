@@ -200,7 +200,7 @@ instance forall sym arch tp. (PA.ValidArch arch, PSo.ValidSym sym) => PP.Pretty 
                  , PP.indent 2 $ PP.vsep (map ppRange locRanges)
                  ]
  pretty (PF.ProofExpr (PF.ProofDomain dom)) = PP.pretty dom
- pretty (PF.ProofExpr (PF.ProofStatus st)) = PP.pretty st
+ pretty (PF.ProofExpr (PF.ProofStatus st)) = error "replace this function"
 
 instance forall sym arch.
   (PA.ValidArch arch, PSo.ValidSym sym) =>
@@ -218,11 +218,7 @@ instance forall sym arch.
 instance forall sym arch.
   (PA.ValidArch arch, PSo.ValidSym sym) =>
   PP.Pretty (PF.VerificationStatus sym arch) where
-  pretty st = case st of
-    PF.Unverified -> "Not verified"
-    PF.VerificationSkipped -> "Skipped (assumed)"
-    PF.VerificationSuccess -> "Succeeded"
-    PF.VerificationFail result cond -> PP.vsep [ "Failed:", PP.pretty result, PP.pretty cond ]
+  pretty st = error "replace this function"
 
 
 
@@ -369,39 +365,7 @@ data GroundBlockExit arch where
   deriving Eq
 
 instance PA.ValidArch arch => PP.Pretty (PF.InequivalenceResult arch) where
-  pretty gineq = PF.withIneqResult gineq $ \ineq ->
-    PP.vsep [ "Reason:" <+> PP.pretty (show (PF.ineqReason ineq))
-            , ppBlockSliceTransition (PF.ineqPre ineq) (PF.ineqPost ineq) (PF.ineqSlice ineq)
-            ]
-
-ppBlockSliceTransition ::
-  forall grnd arch a.
-  PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
-  -- | pre-domain
-  PED.EquivalenceDomain grnd arch ->
-  -- | post-domain
-  PED.EquivalenceDomain grnd arch ->
-  PF.BlockSliceTransition grnd arch ->
-  PP.Doc a
-ppBlockSliceTransition pre post bs = PP.vsep $
-  [ "Block Exit Condition:" <+> PPa.ppPatchPairCEq (PP.pretty . ppExitCase) (PPa.map (\(Const x) -> Const $ grndBlockCase x) groundEnd)
-  ,  "Initial register state:"
-  , ppRegs pre (PF.slRegState $ PF.slBlockPreState bs)
-  , "Initial memory state:"
-  , ppMemCellMap pre (PF.slMemState $ PF.slBlockPreState bs)
-  , "Final register state:"
-  , ppRegs post (PF.slRegState $ PF.slBlockPostState bs)
-  , "Final memory state:"
-  , ppMemCellMap post (PF.slMemState $ PF.slBlockPostState bs)
-  , "Final IP:" <+> ppIPs (PF.slBlockPostState bs)
-  , case PPa.map (\(Const x) -> Const $ grndBlockReturn x) groundEnd of
-      PPa.PatchPairC (Just cont1) (Just cont2) ->
-        "Function Continue Address:" <+> PPa.ppPatchPairCEq (PP.pretty . ppLLVMPointer) (PPa.PatchPairC cont1 cont2)
-      _ -> PP.emptyDoc
-  ]
-  where
-    groundEnd = PPa.map (\(Const x) -> Const $ groundBlockEnd (Proxy @arch) x) $ PF.slBlockExitCase bs
+  pretty gineq = error "replace this function"
 
 ppIPs ::
   PA.ValidArch arch =>
@@ -416,16 +380,6 @@ ppIPs st  =
     True -> PP.pretty $ PPa.someC vals
     False -> PPa.ppPatchPairC PP.pretty vals
 
-ppMemCellMap ::
-  PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
-  PED.EquivalenceDomain grnd arch ->
-  MapF.MapF (PMC.MemCell grnd arch) (PF.BlockSliceMemOp grnd) ->
-  PP.Doc a
-ppMemCellMap dom cells = let
-  eqEntries (Pair cell1 _) (Pair cell2 _) = eqGroundCells cell1 cell2
-  ppCells = mapMaybe (\(Pair cell v) -> ppCellVal dom cell v) $ nubBy eqEntries $ MapF.toList cells
-  in PP.vsep ppCells
 
 -- | True if the two cells represent the same value when grounded
 eqGroundCells ::
@@ -547,28 +501,6 @@ regInGroundDomain dom r = case PER.registerInDomain' r dom of
   Nothing -> False
 
 
-ppCellVal ::
-  PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
-  PED.EquivalenceDomain grnd arch ->
-  PMC.MemCell grnd arch n ->
-  PF.BlockSliceMemOp grnd tp ->
-  Maybe (PP.Doc a)
-ppCellVal dom cell memOp = case PG.groundValue $ PF.slMemOpCond memOp of
-    True -> Just $ ppSlotVal
-    False -> Nothing
-  where
-    vals = PPa.map (\(Const x) -> Const $ groundBV x) $ PF.slMemOpValues memOp
-    ppSlotVal = ppGroundCell cell <> ":" <+> ppVals <+> ppDom
-
-    ppDom = case cellInGroundDomain dom cell of
-      True -> PP.emptyDoc
-      False -> "| Excluded"
- 
-    ppVals = case PG.groundValue $ PF.slMemOpEquiv memOp of
-      True -> PP.pretty $ show (PPa.someC vals)
-      False -> PPa.ppPatchPairC (PP.pretty . show) vals
-
 ppGroundCell ::
   PA.ValidArch arch =>
   PG.IsGroundSym grnd =>
@@ -598,17 +530,6 @@ cellInMemDomain ::
   PMC.MemCell grnd arch n ->
   Bool
 cellInMemDomain dom cell = foldr (\(Some cell', p) p' -> p' && (not (eqGroundMemCells cell cell') || not (PG.groundValue p))) True (PEM.toList dom)
-
-
-cellInGroundDomain ::
-  PA.ValidArch arch =>
-  PG.IsGroundSym grnd =>
-  PED.EquivalenceDomain grnd arch ->
-  PMC.MemCell grnd arch n ->
-  Bool
-cellInGroundDomain dom cell = case isStackCell cell of
-  True -> cellInMemDomain (PED.eqDomainStackMemory dom) cell
-  False -> cellInMemDomain (PED.eqDomainGlobalMemory dom) cell
 
 ppExitCase :: MCS.MacawBlockEndCase -> String
 ppExitCase ec = case ec of
