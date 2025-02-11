@@ -15,7 +15,6 @@ import qualified Data.Time as TM
 
 import qualified Pate.Event as PE
 import qualified Pate.Loader.ELF as PLE
-import qualified Pate.Proof.Instances as PFI
 
 data BinaryMetrics =
   BinaryMetrics { executableBytes :: !Int

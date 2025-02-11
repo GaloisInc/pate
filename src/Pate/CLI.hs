@@ -25,6 +25,7 @@ import qualified System.IO as IO
 import qualified What4.Interface as WI
 
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.CFGSlice as MCS
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
@@ -36,7 +37,6 @@ import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PS
 import qualified Pate.Script as PSc
 import qualified Pate.Timeout as PTi
@@ -64,7 +64,9 @@ mkRunConfig archLoader opts rcfg mtt = let
       }
 
     mklogger :: forall arch. PA.SomeValidArch arch -> IO (PL.Logger arch)
-    mklogger proxy = error "replace this function"
+    mklogger proxy = do
+      (logger, consumers) <- startLogger proxy (verbosity opts) (logFile opts)
+      return $ PL.Logger logger consumers
 
     verificationCfg =
       PC.defaultVerificationCfg
@@ -264,8 +266,8 @@ terminalFormatEvent evt =
                        ) <> PP.line)
     PE.StrongestPostDesync pPair (PVSC.TotalityCounterexample (oIP, oEnd, oInstr) (pIP, pEnd, pInstr)) ->
       layout ( PP.vcat [ PP.pretty pPair PP.<+> "program control flow desynchronized"
-                       , "  Original: 0x" <> PP.pretty (showHex oIP "") PP.<+> PP.pretty (PPI.ppExitCase oEnd) PP.<+> PP.viaShow oInstr
-                       , "  Patched : 0x" <> PP.pretty (showHex pIP "") PP.<+> PP.pretty (PPI.ppExitCase pEnd) PP.<+> PP.viaShow pInstr
+                       , "  Original: 0x" <> PP.pretty (showHex oIP "") PP.<+> PP.pretty (MCS.ppExitCase oEnd) PP.<+> PP.viaShow oInstr
+                       , "  Patched : 0x" <> PP.pretty (showHex pIP "") PP.<+> PP.pretty (MCS.ppExitCase pEnd) PP.<+> PP.viaShow pInstr
                        ] <> PP.line)
     -- FIXME: handle other events
     _ -> layout ""

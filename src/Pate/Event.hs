@@ -38,7 +38,6 @@ import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Hints.BSI as PHB
-import qualified Pate.Proof.Instances as PFI
 import qualified Pate.SimState as PS
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence as PE
