@@ -228,30 +228,8 @@ terminalFormatEvent evt =
                        , PP.viaShow $ PB.concreteAddress blkP
                        , PP.line
                        ]
-    PE.CheckedEquivalence (PPa.PatchPair (PE.Blocks _ blkO _) (PE.Blocks _ blkP _)) res duration ->
-      let
-        origAddr = PB.concreteAddress blkO
-        patchedAddr = PB.concreteAddress blkP
-        pfx = mconcat [ "Checked original block at "
-                      , PP.viaShow origAddr
-                      , " against patched block at "
-                      , PP.viaShow patchedAddr
-                      , " "
-                      , PP.parens (PP.viaShow duration)
-                      ]
-      in case res of
-        PE.Equivalent ->
-          let okStyle = PPRT.color PPRT.Green <> PPRT.bold
-          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate okStyle "✓"))
-        PE.Inconclusive ->
-          let qStyle = PPRT.color PPRT.Magenta <> PPRT.bold
-          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate qStyle "?"))
-        PE.Inequivalent _mdl ->
-          let failStyle = PPRT.color PPRT.Red <> PPRT.bold
-          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
     PE.ErrorRaised err -> layoutLn ("ERROR:" <> PP.pretty err)
     PE.Warning err -> layoutLn ("WARNING:" <> PP.pretty err)
-    PE.ProvenGoal _ prf _ -> layoutLn (PP.viaShow prf)
     PE.HintErrorsCSV errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsJSON errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsDWARF errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))

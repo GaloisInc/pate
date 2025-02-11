@@ -71,20 +71,12 @@ summarize e m =
       m { originalBinaryMetrics = Just (loadedBinaryMetrics origElf)
         , patchedBinaryMetrics = Just (loadedBinaryMetrics patchedElf)
         }
-    PE.ProofIntermediate _bp (PFI.SomeProofNonceExpr _sym nonceExpr) _tm ->
-      case PPr.prfNonceBody nonceExpr of
-        PPr.ProofTriple {} -> m { verifiedGoals = verifiedGoals m + 1 }
-        _ -> m
     -- The following cases don't contribute to the aggregate metrics
-    PE.CheckedEquivalence {} -> m
     PE.ComputedPrecondition {} -> m
     PE.ElfLoaderWarnings {} -> m
     PE.AnalysisStart {} -> m
     PE.ErrorRaised {} -> m
     PE.Warning {} -> m
-    PE.CheckedBranchCompleteness {} -> m
-    PE.ProvenGoal {} -> m
-    PE.ProofStarted {} -> m
     PE.DiscoverBlockPair {} -> m
     PE.HintErrorsCSV {} -> m
     PE.HintErrorsJSON {} -> m

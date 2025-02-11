@@ -28,8 +28,8 @@ Instantiations for the leaves of the proof types
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Pate.Proof.Instances
-  ( SomeProofNonceExpr(..)
-  , ppExitCase
+  (
+  ppExitCase
   )
   
   where
