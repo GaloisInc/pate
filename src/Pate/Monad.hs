@@ -275,19 +275,13 @@ ifConfig checkCfg ifT ifF = (CMR.asks $ checkCfg . envConfig) >>= \case
   False -> ifF
 
 freshNonce :: EquivM sym arch (N.Nonce (PF.SymScope sym) tp)
-freshNonce = do
-  gen <- CMR.asks envNonceGenerator
-  liftIO $ N.freshNonce gen
+freshNonce = error "replace this function"
 
 withProofNonce ::
   forall tp sym arch a.
   (PF.ProofNonce sym tp -> EquivM sym arch a) ->
   EquivM sym arch a
-withProofNonce f = withValid $ do
-  nonce <- freshNonce
-  let proofNonce = PF.ProofNonce nonce
-  CMR.local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
-
+withProofNonce f = error "replace this function"
 
 -- | Start the timer to be used as the initial time when computing
 -- the duration in a nested 'emitEvent'
