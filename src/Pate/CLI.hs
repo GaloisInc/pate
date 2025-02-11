@@ -43,7 +43,6 @@ import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
-import qualified Pate.JSONReport as JR
 import           Pate.TraceTree
 import Data.Maybe (fromMaybe)
 
@@ -65,18 +64,7 @@ mkRunConfig archLoader opts rcfg mtt = let
       }
 
     mklogger :: forall arch. PA.SomeValidArch arch -> IO (PL.Logger arch)
-    mklogger proxy = do
-        (logger, consumers) <- startLogger proxy (verbosity opts) (logFile opts)
-        case proofSummaryJSON opts of
-          Nothing -> return $ PL.Logger logger consumers
-          Just proofJSONFile -> do
-            pc <- JR.consumeProofEvents proofJSONFile
-            let recordProofEvent evt =
-                  case evt of
-                    PE.ProofIntermediate bp sp _ -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
-                    _ -> return ()
-            let jl = LJ.LogAction recordProofEvent
-            return $ PL.Logger (logger <> jl) ((JR.waitForConsumer pc, JR.sendEvent pc Nothing) : consumers)
+    mklogger proxy = error "replace this function"
 
     verificationCfg =
       PC.defaultVerificationCfg

@@ -138,7 +138,6 @@ library
                        Pate.Hints.JSON,
                        Pate.Hints.DWARF,
                        Pate.IOReplay,
-                       Pate.JSONReport,
                        Pate.Location,
                        Pate.Monad,
                        Pate.Monad.Context,
