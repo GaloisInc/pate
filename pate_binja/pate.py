@@ -108,7 +108,7 @@ class PateWrapper:
         # We use a helper script to run logic in the user's shell environment.
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "run-pate.sh")
         # Need -l to make sure user's env is fully setup (e.g. access to docker and ghc tools).
-        allArgs = ['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel', '--add-trace-constraints'] + args
+        allArgs = ['/bin/bash', '-l', script, '-o', original, '-p', patched, '--json-toplevel', '--add-trace-constraints', '--quickstart'] + args
         print('Pate command line: ' + ' '.join(allArgs))
         with open(os.path.join(cwd, "lastrun.replay"), "w", encoding='utf-8') as trace:
             with Popen(allArgs,

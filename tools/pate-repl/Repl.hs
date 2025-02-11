@@ -265,8 +265,14 @@ run rawOpts = do
       -- input (i.e. the initial prompt to select the symbol to start the analysis from)
       -- or has somehow finished executing 
       tree_ready <- MVar.newEmptyMVar
-      topTraceTree' <- forkTraceTreeHook (\tr -> 
-        (runWhenFinishedOrBlocked tr (MVar.putMVar tree_ready ()))) topTraceTree_
+      let doQuickStart = 
+            CLI.quickStart opts && length (CLI.startSymbols opts) == 1
+      topTraceTree' <- case doQuickStart of
+        True -> do
+          -- for quickstart we consider the tree immediately ready
+          forkTraceTreeHook (\_ -> MVar.putMVar tree_ready ()) topTraceTree_
+        False -> forkTraceTreeHook (\tr -> 
+          (runWhenFinishedOrBlocked tr (MVar.putMVar tree_ready ()))) topTraceTree_
 
       cfgE <- CLI.mkRunConfig PAL.archLoader opts PSc.noRunConfig (Just topTraceTree')
       case cfgE of
@@ -323,7 +329,9 @@ run rawOpts = do
               -- The 'tree_ready' lock ensures that we only get to this point
               -- once the prompt is actually ready, so we don't need to
               -- add any explicit delays here.
-              startup
+              case doQuickStart of
+                True -> wait
+                False -> startup
           
     OA.Failure failure -> do
       progn <- getProgName

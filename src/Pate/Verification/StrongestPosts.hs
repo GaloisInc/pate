@@ -218,31 +218,35 @@ asRootEntry (ReturnNode{}) = Nothing
 
 -- FIXME: clagged from initializePairGraph
 chooseEntryPoint ::
+  forall sym arch.
   [PB.FunPair arch] ->
   PairGraph sym arch ->
   EquivM sym arch (PairGraph sym arch)
-chooseEntryPoint entries pg0 = choose @"node" "Choose Entry Point" $ \choice -> do
-  
+chooseEntryPoint entries pg0 = do
   let knownRoots = Set.fromList (mapMaybe asRootEntry (getAllNodes pg0))
   let roots = Set.fromList (mapMaybe (\n -> case n of GraphNode ne -> Just (functionEntryOf ne); _ -> Nothing) (getAllNodes pg0))
   let entries' = Set.fromList (map asEntry $ filter (\e -> not (Set.member e knownRoots)) entries)
-  -- avoid introducing new top-level entries for functions we've already analyzed
-  -- this is a bit clunky and could be done better
-  forM_ (Set.union roots entries') $ \nodeEntry -> do
-    let node = GraphNode nodeEntry
-    choice "" node $ do
-      priority <- thisPriority
-      let pg1 = emptyWorkList $ dropDomain node (priority PriorityDeferred) pg0
-      idom <- initialDomainSpec node
-      rootDom <- PS.forSpec idom $ \_ idom' -> do
-        vals' <- PPa.forBins $ \bin -> do
-          vals <- PPa.get bin (PAD.absDomVals idom')
-          -- FIXME: compute this from the global and stack regions
-          return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
-        return $ idom' { PAD.absDomVals = vals' }
-      let pg2 = freshDomain pg1 node (priority PriorityUserRequest) rootDom
-      let pg3 = emptyReturnVector (dropReturns (returnOfEntry nodeEntry) pg2) (returnOfEntry nodeEntry)
-      return pg3
+  let mkChoice (nodeEntry :: NodeEntry arch) = do
+        let node = GraphNode nodeEntry
+        priority <- thisPriority
+        let pg1 = emptyWorkList $ dropDomain node (priority PriorityDeferred) pg0
+        idom <- initialDomainSpec node
+        rootDom <- PS.forSpec idom $ \_ idom' -> do
+          vals' <- PPa.forBins $ \bin -> do
+            vals <- PPa.get bin (PAD.absDomVals idom')
+            -- FIXME: compute this from the global and stack regions
+            return $ vals { PAD.absMaxRegion = PAD.AbsIntConstant 3 }
+          return $ idom' { PAD.absDomVals = vals' }
+        let pg2 = freshDomain pg1 node (priority PriorityUserRequest) rootDom
+        let pg3 = emptyReturnVector (dropReturns (returnOfEntry nodeEntry) pg2) (returnOfEntry nodeEntry)
+        return pg3
+  asks (PCfg.cfgQuickStart . envConfig) >>= \case
+    True | [entry] <- Set.toList entries' -> mkChoice entry
+    -- avoid introducing new top-level entries for functions we've already analyzed
+    -- this is a bit clunky and could be done better
+    _ -> choose @"node" "Choose Entry Point" $ \choice -> do 
+      forM_ (Set.union roots entries') $ \nodeEntry -> 
+        choice "" (GraphNode nodeEntry) $ mkChoice nodeEntry
 
 -- | Returns a 'Just' result if we should restart verification after performing
 --   some interactive modifications

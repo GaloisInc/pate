@@ -88,6 +88,7 @@ mkRunConfig archLoader opts rcfg mtt = let
         , PC.cfgIgnoreWarnings = ignoreWarnings opts
         , PC.cfgAlwaysClassifyReturn = alwaysClassifyReturn opts
         , PC.cfgTraceConstraints = traceConstraints opts
+        , PC.cfgQuickStart = quickStart opts
         }
     cfg = PL.RunConfig
         { PL.archLoader = archLoader
@@ -142,6 +143,7 @@ data CLIOptions = CLIOptions
   , alwaysClassifyReturn :: Bool
   , preferTextInput :: Bool
   , traceConstraints :: Bool
+  , quickStart :: Bool
   } deriving (Eq, Ord, Show)
 
 printAtVerbosity
@@ -448,4 +450,8 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.switch
          ( OA.long "add-trace-constraints"
          <> OA.help "Prompt to add additional constraints when generating traces."
+         )
+    <*> OA.switch
+         ( OA.long "quickstart"
+         <> OA.help "Start analysis immediately from the given entrypoint (provided from -s)"
          )

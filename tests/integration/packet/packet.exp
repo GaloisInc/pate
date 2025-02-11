@@ -18,7 +18,7 @@
 # Also note this example is mentioned in the README.rst and used in the User Manual.
 # Major changes here likely warrant an update of the corresponding User Manual content.
 
-spawn ./pate.sh --original tests/integration/packet/packet.original.exe --patched tests/integration/packet/packet.patched.exe -s parse_packet --add-trace-constraints
+spawn ./pate.sh --quickstart --original tests/integration/packet/packet.original.exe --patched tests/integration/packet/packet.patched.exe -s parse_packet --add-trace-constraints
 
 set timeout 480
 
@@ -27,19 +27,10 @@ expect_before {
         eof     { send_user "\n\nFAILURE: eof\n";     exit 2 }
 }
 
-expect "Choose Entry Point"
-expect "1: Function Entry \"parse_packet\" (segment1+0x590)"
-expect "?>"
-send "1\r"
-send "top\r"
-send "wait\r"
-
 expect "Handle observable difference:"
 expect "4: Avoid difference with equivalence condition"
 expect "?>"
 send "4\r"
-send "top\r"
-send "wait\r"
 
 expect "Continue verification?"
 expect "0: Finish and view final result"

@@ -292,6 +292,9 @@ data VerificationConfig validRepr =
     -- a menu selection
     , cfgTraceConstraints :: Bool
     -- ^ flag to determine if the user should be prompted to add constraints to traces
+    , cfgQuickStart :: Bool
+    -- ^ flag to indicate that the analysis should start from the provided entrypoint
+    --   (has no effect if no entrypoint is given)
     }
 
 
@@ -320,4 +323,5 @@ defaultVerificationCfg =
                      , cfgAlwaysClassifyReturn = False
                      , cfgPreferTextInput = False
                      , cfgTraceConstraints = False
+                     , cfgQuickStart = False
                      }
