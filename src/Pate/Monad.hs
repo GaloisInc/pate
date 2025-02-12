@@ -83,9 +83,6 @@ module Pate.Monad
   , applyCurrentAsms
   , applyCurrentAsmsExpr
   , currentAsm
-  -- nonces
-  , freshNonce
-  , withProofNonce
   -- caching
   , lookupBlockCache
   , modifyBlockCache
@@ -195,7 +192,6 @@ import           Pate.Monad.Environment as PME
 import           Pate.Panic
 import qualified Pate.Parallel as Par
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Proof as PF
 import           Pate.SimState
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Solver as PSo
@@ -273,21 +269,6 @@ ifConfig ::
 ifConfig checkCfg ifT ifF = (CMR.asks $ checkCfg . envConfig) >>= \case
   True -> ifT
   False -> ifF
-
-freshNonce :: EquivM sym arch (N.Nonce (PF.SymScope sym) tp)
-freshNonce = do
-  gen <- CMR.asks envNonceGenerator
-  liftIO $ N.freshNonce gen
-
-withProofNonce ::
-  forall tp sym arch a.
-  (PF.ProofNonce sym tp -> EquivM sym arch a) ->
-  EquivM sym arch a
-withProofNonce f = withValid $ do
-  nonce <- freshNonce
-  let proofNonce = PF.ProofNonce nonce
-  CMR.local (\env -> env { envParentNonce = Some proofNonce }) (f proofNonce)
-
 
 -- | Start the timer to be used as the initial time when computing
 -- the duration in a nested 'emitEvent'

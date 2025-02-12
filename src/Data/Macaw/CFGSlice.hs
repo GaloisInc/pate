@@ -34,6 +34,7 @@ module Data.Macaw.CFGSlice
   , termStmtToBlockEnd
   , blockEndSliceFns
   , copyBlockEnd
+  , ppExitCase
   ) where
 
 import qualified GHC.Generics as G
@@ -82,6 +83,15 @@ data MacawBlockEndCase =
   -- as either calls or returns, according to 'archTermCase'
   | MacawBlockEndArch
   deriving (Eq, Enum, Bounded, Ord, Show, G.Generic)
+
+ppExitCase :: MacawBlockEndCase -> String
+ppExitCase ec = case ec of
+  MacawBlockEndJump -> "arbitrary jump"
+  MacawBlockEndCall -> "function call"
+  MacawBlockEndReturn -> "function return"
+  MacawBlockEndBranch -> "branch"
+  MacawBlockEndArch -> "arch-specific"
+  MacawBlockEndFail -> "analysis failure"
 
 instance JSON.ToJSON MacawBlockEndCase
 

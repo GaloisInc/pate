@@ -87,9 +87,6 @@ import qualified Pate.Event as PE
 import qualified Pate.Equivalence.EquivalenceDomain as PEE
 import qualified Pate.Equivalence.Error as PEE
 import qualified Pate.Equivalence.MemoryDomain as PEMd
-import qualified Pate.Proof.Operations as PP
-import qualified Pate.Proof.CounterExample as PP
-import qualified Pate.Proof.Instances ()
 import qualified Pate.ExprMappable as PEM
 import qualified Pate.Solver as PSo
 import qualified Pate.Verification.Simplify as PSi
@@ -1725,11 +1722,7 @@ widenPostcondition scope bundle preD postD0 = do
            emitTrace @"message" "equivalence failure"
            if i <= 0 then
              -- we ran out of gas
-             do slice <- PP.simBundleToSlice scope bundle
-                ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
-                let msg = unlines [ "Ran out of gas performing local widenings"
-                                  , show (pretty ineqRes)
-                                  ]
+             do let msg = unlines [ "Ran out of gas performing local widenings" ]
                 return $ result $ WideningError msg this_loc postD
            else do
              -- The current execution does not satisfy the postcondition, and we have
@@ -1742,14 +1735,9 @@ widenPostcondition scope bundle preD postD0 = do
                NoWideningRequired -> case stWidenCase prevState of
                  WidenCaseStart ->  do
                    -- if we haven't performed any widenings yet, then this is an error
-                   slice <- PP.simBundleToSlice scope bundle
-                   ineqRes <- PP.getInequivalenceResult PEE.InvalidPostState
-                                   (PAD.absDomEq $ preD) (PAD.absDomEq $ postD) slice evalFn
                    let msg = unlines [ "Could not find any values to widen!"
                                      , show (pretty loc)
-                                     , show (pretty ineqRes)
                                      ]
-                   
                    return $ result $ WideningError msg this_loc postD
                  _ -> return prevState
                Widen widenk (WidenLocs locs) d -> do

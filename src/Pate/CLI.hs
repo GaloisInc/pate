@@ -25,6 +25,7 @@ import qualified System.IO as IO
 import qualified What4.Interface as WI
 
 import qualified Data.Macaw.CFG as MC
+import qualified Data.Macaw.CFGSlice as MCS
 
 import qualified Pate.Arch as PA
 import qualified Pate.Block as PB
@@ -36,14 +37,12 @@ import qualified Pate.Loader as PL
 import qualified Pate.Loader.ELF as PLE
 import qualified Pate.Memory.MemTrace as PMT
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PS
 import qualified Pate.Script as PSc
 import qualified Pate.Timeout as PTi
 import qualified Pate.Verbosity as PV
 import qualified Pate.Verification.StrongestPosts.CounterExample as PVSC
 
-import qualified Pate.JSONReport as JR
 import           Pate.TraceTree
 import Data.Maybe (fromMaybe)
 
@@ -66,17 +65,8 @@ mkRunConfig archLoader opts rcfg mtt = let
 
     mklogger :: forall arch. PA.SomeValidArch arch -> IO (PL.Logger arch)
     mklogger proxy = do
-        (logger, consumers) <- startLogger proxy (verbosity opts) (logFile opts)
-        case proofSummaryJSON opts of
-          Nothing -> return $ PL.Logger logger consumers
-          Just proofJSONFile -> do
-            pc <- JR.consumeProofEvents proofJSONFile
-            let recordProofEvent evt =
-                  case evt of
-                    PE.ProofIntermediate bp sp _ -> JR.sendEvent pc (Just (JR.SomeProofEvent bp sp))
-                    _ -> return ()
-            let jl = LJ.LogAction recordProofEvent
-            return $ PL.Logger (logger <> jl) ((JR.waitForConsumer pc, JR.sendEvent pc Nothing) : consumers)
+      (logger, consumers) <- startLogger proxy (verbosity opts) (logFile opts)
+      return $ PL.Logger logger consumers
 
     verificationCfg =
       PC.defaultVerificationCfg
@@ -240,30 +230,8 @@ terminalFormatEvent evt =
                        , PP.viaShow $ PB.concreteAddress blkP
                        , PP.line
                        ]
-    PE.CheckedEquivalence (PPa.PatchPair (PE.Blocks _ blkO _) (PE.Blocks _ blkP _)) res duration ->
-      let
-        origAddr = PB.concreteAddress blkO
-        patchedAddr = PB.concreteAddress blkP
-        pfx = mconcat [ "Checked original block at "
-                      , PP.viaShow origAddr
-                      , " against patched block at "
-                      , PP.viaShow patchedAddr
-                      , " "
-                      , PP.parens (PP.viaShow duration)
-                      ]
-      in case res of
-        PE.Equivalent ->
-          let okStyle = PPRT.color PPRT.Green <> PPRT.bold
-          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate okStyle "✓"))
-        PE.Inconclusive ->
-          let qStyle = PPRT.color PPRT.Magenta <> PPRT.bold
-          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate qStyle "?"))
-        PE.Inequivalent _mdl ->
-          let failStyle = PPRT.color PPRT.Red <> PPRT.bold
-          in layoutLn (pfx <> " " <> PP.brackets (PP.annotate failStyle "✗"))
     PE.ErrorRaised err -> layoutLn ("ERROR:" <> PP.pretty err)
     PE.Warning err -> layoutLn ("WARNING:" <> PP.pretty err)
-    PE.ProvenGoal _ prf _ -> layoutLn (PP.viaShow prf)
     PE.HintErrorsCSV errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsJSON errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
     PE.HintErrorsDWARF errs -> layoutLn (PP.vsep (map PP.viaShow (F.toList errs)))
@@ -298,8 +266,8 @@ terminalFormatEvent evt =
                        ) <> PP.line)
     PE.StrongestPostDesync pPair (PVSC.TotalityCounterexample (oIP, oEnd, oInstr) (pIP, pEnd, pInstr)) ->
       layout ( PP.vcat [ PP.pretty pPair PP.<+> "program control flow desynchronized"
-                       , "  Original: 0x" <> PP.pretty (showHex oIP "") PP.<+> PP.pretty (PPI.ppExitCase oEnd) PP.<+> PP.viaShow oInstr
-                       , "  Patched : 0x" <> PP.pretty (showHex pIP "") PP.<+> PP.pretty (PPI.ppExitCase pEnd) PP.<+> PP.viaShow pInstr
+                       , "  Original: 0x" <> PP.pretty (showHex oIP "") PP.<+> PP.pretty (MCS.ppExitCase oEnd) PP.<+> PP.viaShow oInstr
+                       , "  Patched : 0x" <> PP.pretty (showHex pIP "") PP.<+> PP.pretty (MCS.ppExitCase pEnd) PP.<+> PP.viaShow pInstr
                        ] <> PP.line)
     -- FIXME: handle other events
     _ -> layout ""

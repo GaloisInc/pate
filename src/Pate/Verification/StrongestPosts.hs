@@ -106,7 +106,6 @@ import qualified Pate.Monad.Environment as PME
 import           Pate.Monad.PairGraph
 import           Pate.Panic
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Proof.Instances as PPI
 import qualified Pate.SimState as PS
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.Verification.StrongestPosts.CounterExample as CE
@@ -2209,8 +2208,8 @@ instance ValidSymArch sym arch => IsTraceNode '(sym,arch) "totality" where
     TotalityCheckingError msg -> "Error:" <+> PP.pretty msg
     TotalityCheckCounterexample ocex (TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) -> PP.vsep $
       ["Found extra exit while checking totality:"
-      , PP.pretty (showHex oIP "") <+> PP.pretty (PPI.ppExitCase oEnd) <+> PP.pretty (show oInstr)
-      , PP.pretty (showHex pIP "") <+> PP.pretty (PPI.ppExitCase pEnd) <+> PP.pretty (show pInstr)
+      , PP.pretty (showHex oIP "") <+> PP.pretty (MCS.ppExitCase oEnd) <+> PP.pretty (show oInstr)
+      , PP.pretty (showHex pIP "") <+> PP.pretty (MCS.ppExitCase pEnd) <+> PP.pretty (show pInstr)
       , ""
       , PP.pretty ocex
       ]
@@ -2246,8 +2245,8 @@ checkTotality bPair scope bundle preD exits gr =
          TotalityCheckCounterexample _ cex@(TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) ->
            do traceBundle bundle $ unlines
                 ["Found extra exit while checking totality:"
-                , showHex oIP "" ++ " " ++ PPI.ppExitCase oEnd ++ " " ++ show oInstr
-                , showHex pIP "" ++ " " ++ PPI.ppExitCase pEnd ++ " " ++ show pInstr
+                , showHex oIP "" ++ " " ++ MCS.ppExitCase oEnd ++ " " ++ show oInstr
+                , showHex pIP "" ++ " " ++ MCS.ppExitCase pEnd ++ " " ++ show pInstr
                 ]
               
               return (Just cex, gr)

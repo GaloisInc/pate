@@ -10,9 +10,7 @@
 module Pate.Event (
   Blocks(..),
   BlocksPair,
-  EquivalenceResult(..),
   BlockTargetResult(..),
-  BranchCompletenessResult(..),
   Event(..),
   SolverResultKind(..),
   SolverProofKind(..)
@@ -40,8 +38,6 @@ import qualified Pate.Hints.CSV as PHC
 import qualified Pate.Hints.DWARF as PHD
 import qualified Pate.Hints.JSON as PHJ
 import qualified Pate.Hints.BSI as PHB
-import qualified Pate.Proof as PF
-import qualified Pate.Proof.Instances as PFI
 import qualified Pate.SimState as PS
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Equivalence as PE
@@ -59,10 +55,6 @@ data Blocks arch bin where
 
 type BlocksPair arch = PPa.PatchPair (Blocks arch)
 
-data EquivalenceResult arch = Equivalent
-                            | Inconclusive
-                            | Inequivalent (PF.InequivalenceResult arch)
-
 data BlockTargetResult = Reachable
                        | InconclusiveTarget
                        | Unreachable
@@ -71,10 +63,6 @@ data BlockTargetResult = Reachable
 instance IsTraceNode k "blocktargetresult" where
   type TraceNodeType k "blocktargetresult" = BlockTargetResult
   prettyNode () result = PP.pretty (show result)
-
-data BranchCompletenessResult arch = BranchesComplete
-                                   | InconclusiveBranches
-                                   | BranchesIncomplete (PF.InequivalenceResult arch)
 
 
 -- | Events that can be reported from the verifier
@@ -87,16 +75,9 @@ data Event arch where
   ErrorRaised :: PEE.EquivalenceError -> Event arch
   Warning :: PEE.EquivalenceError -> Event arch
   -- | final top-level result
-  ProvenGoal :: BlocksPair arch ->  PFI.SomeProofNonceExpr arch PF.ProofBlockSliceType -> TM.NominalDiffTime -> Event arch
-  -- | intermediate results
-  ProofIntermediate :: BlocksPair arch -> PFI.SomeProofNonceExpr arch tp -> TM.NominalDiffTime -> Event arch
-  ProofStarted :: BlocksPair arch -> PFI.SomeProofNonceExpr arch tp -> TM.NominalDiffTime -> Event arch
-
-  CheckedBranchCompleteness :: BlocksPair arch -> BranchCompletenessResult arch -> TM.NominalDiffTime -> Event arch
   DiscoverBlockPair :: BlocksPair arch -> PPa.PatchPair (PB.BlockTarget arch) -> BlockTargetResult -> TM.NominalDiffTime -> Event arch
   ComputedPrecondition :: BlocksPair arch -> TM.NominalDiffTime -> Event arch
   ElfLoaderWarnings :: [DEE.ElfParseError] -> Event arch
-  CheckedEquivalence :: BlocksPair arch -> EquivalenceResult arch -> TM.NominalDiffTime -> Event arch
   LoadedBinaries :: PLE.LoadedELF arch -> PLE.LoadedELF arch -> Event arch
   -- | Function/block start hints that point to unmapped addresses
   FunctionEntryInvalidHints :: PB.WhichBinaryRepr bin -> [(T.Text, Word64)] -> Event arch

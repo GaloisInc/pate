@@ -67,7 +67,6 @@ import qualified Pate.Memory.MemTrace as MT
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
 import qualified Pate.Location as PL
-import qualified Pate.Proof as PF
 import qualified Pate.Solver as PSo
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
@@ -99,9 +98,6 @@ data EquivEnv sym arch where
     -- ^ the current assumption frame, accumulated as assumptions are added
     , envPathCondition :: PAS.AssumptionSet sym
     -- ^ assumptions specific to a particular path (subsumed by envCurrentFrame)
-    , envNonceGenerator :: N.NonceGenerator IO (PF.SymScope sym)
-    , envParentNonce :: Some (PF.ProofNonce sym)
-    -- ^ nonce of the parent proof node currently in scope
     , envUndefPointerOps :: MT.UndefinedPtrOps sym
     , envParentBlocks :: [PB.BlockPair arch]
     -- ^ all block pairs on this path from the toplevel

@@ -47,7 +47,6 @@ import           Prettyprinter ( (<+>) )
 
 import qualified Pate.Memory.MemTrace as MT
 import           Pate.TraceTree
-import qualified Pate.Proof.Instances as PPI
 import qualified Pate.Solver as PSo
 import qualified Pate.SimulatorRegisters as PSR
 import qualified Pate.PatchPair as PPa
@@ -100,8 +99,8 @@ instance MM.MemWidth (MM.RegAddrWidth (MM.ArchReg arch)) => IsTraceNode '(sym,ar
   type TraceNodeType '(sym,arch) "totalityce" = TotalityCounterexample (MM.ArchAddrWidth arch)
   prettyNode () (TotalityCounterexample (oIP,oEnd,oInstr) (pIP,pEnd,pInstr)) = PP.vsep $
       ["Found extra exit while checking totality:"
-      , PP.pretty (showHex oIP "") <+> PP.pretty (PPI.ppExitCase oEnd) <+> PP.pretty (show oInstr)
-      , PP.pretty (showHex pIP "") <+> PP.pretty (PPI.ppExitCase pEnd) <+> PP.pretty (show pInstr)
+      , PP.pretty (showHex oIP "") <+> PP.pretty (MCS.ppExitCase oEnd) <+> PP.pretty (show oInstr)
+      , PP.pretty (showHex pIP "") <+> PP.pretty (MCS.ppExitCase pEnd) <+> PP.pretty (show pInstr)
       ]
   nodeTags = [(Summary, \_ _ -> "Not total") ]
 

@@ -81,7 +81,6 @@ import qualified Pate.Memory.MemTrace as MT
 import           Pate.Monad
 import qualified Pate.Monad.Context as PMC
 import qualified Pate.PatchPair as PPa
-import qualified Pate.Proof as PF
 import qualified Pate.Solver as PS
 import qualified Pate.SymbolTable as PSym
 import qualified Pate.Verification.Override as PVO
@@ -211,7 +210,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
   stackRegion <- liftIO $ W4.natLit sym 1
 
   startedAt <- liftIO TM.getCurrentTime
-  topNonce <- liftIO $ (PF.ProofNonce <$> N.freshNonce gen)
 
   -- NOTE: This is using the global nonce generator because it gets sunk down
   -- into contexts where the scope type parameter is quantified out in ways that
@@ -313,8 +311,6 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
           , envStartTime = startedAt
           , envCurrentFrame = mempty
           , envPathCondition = mempty
-          , envNonceGenerator = gen
-          , envParentNonce = Some topNonce
           , envUndefPointerOps = undefops
           , envParentBlocks = mempty
           , envEqCondFns = mempty
