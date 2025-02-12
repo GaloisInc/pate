@@ -550,7 +550,7 @@ class PateWrapper:
             if self.config_callback:
                 self.config_callback(self.config)
             rec = self.next_json()
-            self.command('goto_prompt')
+            self.command('init_json')
             while self.command_step():
                 pass
             # Enter trace constraint processing mode
