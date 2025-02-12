@@ -262,7 +262,9 @@ doVerifyPairs validArch logAction elf elf' vcfg pd gen sym = do
       return $ ctx { PMC.parsedFunctionMap = pfm1 }) context' entryPoints
   
   -- ordered by preference for chooseEntryPoint
-  let pPairs' = entryPoints' ++ (unpackedPairs upData) ++ [topEntryPoint]
+  let pPairs' = case PC.cfgQuickStart vcfg of
+        True | [singleEntry] <- entryPoints' -> [singleEntry]
+        _ -> entryPoints' ++ (unpackedPairs upData) ++ [topEntryPoint]
   let solver = PC.cfgSolver vcfg
   let saveInteraction = PC.cfgSolverInteractionFile vcfg
   let

@@ -265,8 +265,14 @@ run rawOpts = do
       -- input (i.e. the initial prompt to select the symbol to start the analysis from)
       -- or has somehow finished executing 
       tree_ready <- MVar.newEmptyMVar
-      topTraceTree' <- forkTraceTreeHook (\tr -> 
-        (runWhenFinishedOrBlocked tr (MVar.putMVar tree_ready ()))) topTraceTree_
+      let doQuickStart = 
+            CLI.quickStart opts && length (CLI.startSymbols opts) == 1
+      topTraceTree' <- case doQuickStart of
+        True -> do
+          -- for quickstart we consider the tree immediately ready
+          forkTraceTreeHook (\_ -> MVar.putMVar tree_ready ()) topTraceTree_
+        False -> forkTraceTreeHook (\tr -> 
+          (runWhenFinishedOrBlocked tr (MVar.putMVar tree_ready ()))) topTraceTree_
 
       cfgE <- CLI.mkRunConfig PAL.archLoader opts PSc.noRunConfig (Just topTraceTree')
       case cfgE of
@@ -323,8 +329,12 @@ run rawOpts = do
               -- The 'tree_ready' lock ensures that we only get to this point
               -- once the prompt is actually ready, so we don't need to
               -- add any explicit delays here.
-              startup
-          
+              case doQuickStart of
+                True -> case CLI.jsonToplevel opts of
+                  True -> PO.printMsgLn "Pate started"
+                  False -> wait
+                False -> startup
+
     OA.Failure failure -> do
       progn <- getProgName
       let (msg, exit) = OA.renderFailure failure progn
@@ -570,14 +580,20 @@ top :: IO ()
 top = execReplM $ (top' >> ls')
 
 top' :: ReplM sym arch ()
-top' = do
+top' = top'' True
+
+top'' :: Bool -> ReplM sym arch ()
+top'' print_msg = do
   prevNodes <- gets replPrev
   case prevNodes of
-    [] -> PO.printMsgLn "<<At top level>>"
+    [] -> case print_msg of
+      True -> PO.printMsgLn "<<At top level>>"
+      False -> return ()
     _ -> do
       Some init <- return $ last prevNodes
       loadTraceNode init
       modify $ \st -> st { replPrev = [] }
+
 
 status' :: Maybe Int -> IO ()
 status' mlimit = do
@@ -664,17 +680,18 @@ asChoiceTree (node@(TraceNode _ v _)) = case testEquality (knownSymbol @nm) (kno
   Just Refl -> return $ Just v
   Nothing -> return Nothing
 
-goto_status'' :: (NodeStatus -> Bool) -> [Some (TraceNode sym arch)] -> ReplM sym arch ()
+goto_status'' :: (NodeStatus -> Bool) -> [Some (TraceNode sym arch)] -> ReplM sym arch Bool
 goto_status'' f (Some node@(TraceNode _ _ subtree) : xs) = do
   st <- IO.liftIO $ getTreeStatus subtree
   case f st of
     True -> do
-
-      goto_node' node >> (goto_status' f)
+      goto_node' node
+      goto_status' f
+      return True
     False -> goto_status'' f xs
-goto_status'' f [] = return ()
+goto_status'' f [] = return False
 
-goto_status' :: (NodeStatus -> Bool) -> ReplM sym arch ()
+goto_status' :: (NodeStatus -> Bool) -> ReplM sym arch Bool
 goto_status' f = do
   updateNextNodes
   nextNodes <- gets replNext
@@ -691,6 +708,18 @@ goto_err = execReplM (goto_status' isErrStatus >> ls')
 
 goto_prompt :: IO ()
 goto_prompt = execReplM (goto_status' isBlockedStatus >> ls')
+
+-- | Sent by the front-end after receiving the first message
+init_json :: IO ()
+init_json = do
+  did_goto <- runReplM $ do
+    top'' False
+    goto_status' isBlockedStatus >>= \case
+      True -> ls' >> return True
+      False -> return False
+  case did_goto of
+    Just True -> return ()
+    _ -> wait
 
 next :: IO ()
 next = execReplM $ do
