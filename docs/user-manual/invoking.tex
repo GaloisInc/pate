@@ -103,7 +103,7 @@ contents, programs that exercise proper stack hygiene should never
 access those values. By assuming they are equal, \pate{} avoids 
 creating spurious counter-examples where under-specified pointers
 alias inequivalent, but out-of-scope, stack slots.
-This is a fairly strong assumption that can have unintended side-effects,
+This is a fairly strong assumption that can have unintended side effects,
 including assuming \emph{false} when out-of-scope stack contents are
 \emph{provably} inequivalent.
 

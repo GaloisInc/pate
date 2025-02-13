@@ -68,7 +68,7 @@ A given address and context may appear multiple times in the toplevel list, corr
 The latest (highest-numbered) entry corresponds to the most recent analysis of an address/context.
 
 Each entry point is associated with an equivalence domain: a set of locations (registers, stack slots and memory addresses) that are potentially not equal at this point.
-Locations outside of this set have been proven to be equal (ignoring skipped functions).
+Locations outside this set have been proven to be equal (ignoring skipped functions).
 The analysis takes the equivalence domain of an entry point and computes an equivalence domain for each possible exit point (according to the semantics of the block).
 
 At this point in the example, \pate{} is asking how a detected observable difference should be handled.
@@ -113,7 +113,7 @@ The user selects \texttt{4} to capture the difference in the equivalence conditi
 
 The user selects \texttt{0} to finish and view the final result.
 
-The \pate{} analysis tree can be navigated by the user with \texttt{top} to move to the top of the tree, numbers to navigate ``into'' nodes, \texttt{up} to move ``up'' a node, and \texttt{ls} to redisplay the nodes available at a current level.
+The \pate{} analysis tree can be navigated by the user with \texttt{top} to move to the top of the tree, numbers to navigate ``into'' nodes, \texttt{up} to move ``up'' a node, and \texttt{ls} to re-display the nodes available at a current level.
 
 For example, to inspect the analysis results in the running example, the user may provide input as follows to view the equivalence condition:
 
