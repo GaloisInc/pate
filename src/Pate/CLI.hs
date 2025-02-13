@@ -429,7 +429,10 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.optional (OA.strOption
          ( OA.long "script"
          <> OA.metavar "FILENAME"
-         <> OA.help "Save macaw CFGs to the provided directory"
+         <> OA.help (
+                 "Path to a pate script file. Provides pre-defined input for user prompts" 
+              ++ " (see tests/integration/packet-mod/packet.pate for an example and"
+              ++ " src/Pate/Script.hs for details)" )
          ))
     <*> OA.switch
          ( OA.long "assume-stack-scope"
