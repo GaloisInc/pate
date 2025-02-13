@@ -7,7 +7,7 @@ We recommend using \pate{} via Docker.
 
 If available, load the Docker image file from a file using:
 \begin{verbatim}
-  docker load -i /path/to/pate.tar
+  docker load -i /path/to/pate.tar.gz
 \end{verbatim}
 
 Otherwise, build the Docker image from the \pate{} source repo.
@@ -27,9 +27,9 @@ Build the image using the following commands:
 \begin{verbatim}
   docker run --rm -it \
     --platform linux/amd64 \
-    -v "$(pwd)"/tests/integration/packet/exe:/target \
+    -v "$(pwd)"/tests/integration/packet:/target \
     pate \
-    --original /target/packet.exe \
+    --original /target/packet.original.exe \
     --patched /target/packet.patched.exe \
     -s parse_packet
 \end{verbatim}
