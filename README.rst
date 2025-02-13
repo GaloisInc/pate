@@ -86,12 +86,21 @@ The verifier accepts the following command line arguments::
                            only)
   --read-only-segments ARG Mark segments as read-only (0-indexed) when loading
                            ELF
-  --script FILENAME        Save macaw CFGs to the provided directory
+  --script FILENAME        Path to a pate script file. Provides pre-defined
+                           input for user prompts (see
+                           tests/integration/packet-mod/packet.pate for an
+                           example and src/Pate/Script.hs for details)
   --assume-stack-scope     Add additional assumptions about stack frame scoping
                            during function calls (unsafe)
   --ignore-warnings ARG    Don't raise any of the given warning types
   --always-classify-return Always resolve classifier failures by assuming
                            function returns, if possible.
+  --prefer-text-input      Prefer taking text input over multiple choice menus
+                           where possible.
+  --add-trace-constraints  Prompt to add additional constraints when generating
+                           traces.
+  --quickstart             Start analysis immediately from the given entrypoint
+                           (provided from -s)
 
 Extended Examples
 -----------------
