@@ -9,14 +9,14 @@ The user makes a selection by entering a number representing the node of interes
 
 \subsection{Example Usage}
 
-Launch \pate{} on the binaries in the \texttt{tests/integration/packet/exe/} directory with:
+Launch \pate{} on the binaries in the \texttt{tests/integration/packet/} directory with:
 
 \begin{verbatim}
    docker run --rm -it \
      --platform linux/amd64 \
-     -v "$(pwd)"/tests/integration/packet/exe:/target \
+     -v "$(pwd)"/tests/integration/packet:/target \
      pate \
-     --original /target/packet.exe \
+     --original /target/packet.original.exe \
      --patched /target/packet.patched.exe \
      -s parse_packet
  \end{verbatim}
@@ -25,7 +25,7 @@ Once launched, \pate{} presents the user is presented with a list of entry point
 \begin{lstlisting}
   Choose Entry Point
   0: Function Entry "_start" (segment1+0x435)
-  1: Function Entry "parse_packet" (segment1+0x554)
+  1: Function Entry "parse_packet" (segment1+0x590)
   ?> |\colorbox{yellow}{1}|
 \end{lstlisting}
 
@@ -34,30 +34,37 @@ Here the user enters \texttt{1}, selecting \texttt{parse\_packet}.
 This starts \pate{}'s analysis at this point, and the user sees output of:
 
 \begin{lstlisting}
-...........
-0: Function Entry "parse_packet" (segment1+0x554) (User Request).........
-1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains).........
-2: segment1+0x5ac [ via: "parse_packet" (segment1+0x554) ]
+..
+0: Function Entry "parse_packet" (segment1+0x590) (User Request)
+1: segment1+0x5c0 [ via: "parse_packet" (segment1+0x590) ] 
    (Widening Equivalence Domains)
-3: Return "parse_packet" (segment1+0x554)
-   (Widening Equivalence Domains)........
-4: segment1+0x5cc [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains).........
-5: segment1+0x5e0 [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains)........
-6: segment1+0x600 [ via: "parse_packet" (segment1+0x554) ]
+2: segment1+0x600 [ via: "parse_packet" (segment1+0x590) ] 
    (Widening Equivalence Domains)
-7: Return "parse_packet" (segment1+0x554)
-   (Widening Equivalence Domains).........
-8: segment1+0x624 [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains).........
+3: Return "parse_packet" (segment1+0x590) 
+   (Widening Equivalence Domains)
+4: segment1+0x63c [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+5: segment1+0x658 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+6: segment1+0x698 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+7: segment1+0x6d8 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+8: Function Entry "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+9: Return "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+10: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
 Handle observable difference:
-0: Emit warning and continue
-1: Assert difference is infeasible (defer proof)
-2: Assert difference is infeasible (prove immediately)
-3: Assume difference is infeasible
-4: Avoid difference with equivalence condition
+0: Emit warning and continue 
+1: Assert difference is infeasible (defer proof) 
+2: Assert difference is infeasible (prove immediately) 
+3: Assume difference is infeasible 
+4: Avoid difference with equivalence condition 
+5: Avoid difference with path-sensitive equivalence condition
 ?> |\colorbox{yellow}{4}|
 \end{lstlisting}
 
@@ -75,40 +82,72 @@ At this point in the example, \pate{} is asking how a detected observable differ
 The user selects \texttt{4} to capture the difference in the equivalence condition, and \pate{} continues its analysis:
 
 \begin{lstlisting}
-  0: Function Entry "parse_packet" (segment1+0x554) (User Request)
-  1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  2: segment1+0x5ac [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  3: Return "parse_packet" (segment1+0x554)
-     (Widening Equivalence Domains)
-  4: segment1+0x5cc [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  5: segment1+0x5e0 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  6: segment1+0x600 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  7: Return "parse_packet" (segment1+0x554)
-     (Widening Equivalence Domains)
-  8: segment1+0x624 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  9: segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)........
-  10: segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
-     (Re-checking Block Exits)........
-  11: segment1+0x654 (original) vs. segment1+0x668 (patched)
-     [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)........
-  12: segment1+0x668 (original) vs. segment1+0x67c (patched)
-     [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  13: Return "parse_packet" (segment1+0x554)
-      (Widening Equivalence Domains)
-  Continue verification?
-  0: Finish and view final result
-  1: Restart from entry point
-  2: Handle pending refinements
-  ?> |\colorbox{yellow}{0}|
+0: Function Entry "parse_packet" (segment1+0x590) (User Request)
+1: segment1+0x5c0 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+2: segment1+0x600 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+3: Return "parse_packet" (segment1+0x590) 
+   (Widening Equivalence Domains)
+4: segment1+0x63c [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+5: segment1+0x658 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+6: segment1+0x698 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+7: segment1+0x6d8 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+8: Function Entry "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+9: Return "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+10: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+11: segment1+0x71c [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+12: segment1+0x71c [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Block Exits)
+13: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Propagating Conditions)
+14: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Block Exits)
+15: Return "check_crc" (segment1+0x530) [ via: "parse_packet" (segment1+0x6ec) ] 
+    (Propagating Conditions)
+16: segment1+0x71c [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+17: Return "parse_packet" (segment1+0x590) (Widening Equivalence Domains)
+18: segment1+0x758 [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+19: Function Entry "parse_data" (segment1+0x558) 
+    [ via: "parse_packet" (segment1+0x774) ] 
+    (Widening Equivalence Domains)
+20: segment1+0x584 [ via: "parse_data" (segment1+0x558) 
+      <- "parse_packet" (segment1+0x774) ] 
+    (Widening Equivalence Domains)
+21: Return "parse_data" (segment1+0x558) 
+    [ via: "parse_packet" (segment1+0x774) ] 
+    (Widening Equivalence Domains)
+22: segment1+0x774 [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+23: Return "parse_packet" (segment1+0x590) 
+    (Widening Equivalence Domains)
+24: segment1+0x5c0 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+25: Return "parse_packet" (segment1+0x590) 
+    (Widening Equivalence Domains)
+26: segment1+0x600 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+27: segment1+0x658 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+28: segment1+0x698 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+Continue verification?
+0: Finish and view final result 
+1: Restart from entry point 
+2: Handle pending refinements 
+?> |\colorbox{yellow}{0}|
 \end{lstlisting}
 
 The user selects \texttt{0} to finish and view the final result.
@@ -119,7 +158,7 @@ For example, to inspect the analysis results in the running example, the user ma
 
 \begin{lstlisting}
   ...
-  15: Final Result
+  30: Final Result
   > |\colorbox{yellow}{15}|
   Final Result
   0: Assumed Equivalence Conditions
