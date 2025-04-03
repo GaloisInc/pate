@@ -29,8 +29,6 @@ The verifier accepts the following command line arguments::
   -p,--patched EXE         Patched binary
   -b,--blockinfo FILENAME  Block information relating binaries
   -s,--startsymbol ARG     Start analysis from the function with this symbol
-  -d,--nodiscovery         Don't dynamically discover function pairs based on
-                           calls.
   --solver ARG             The SMT solver to use to solve verification
                            conditions. One of CVC4, Yices, or Z3
                            (default: Yices)
@@ -67,20 +65,12 @@ The verifier accepts the following command line arguments::
   --solver-interaction-file FILE
                            Save interactions with the SMT solver during symbolic
                            execution to this file
-  --proof-summary-json FILE
-                           A file to save interesting proof results to in JSON
-                           format
   --log-file FILE          A file to save debug logs to
   -e,--errormode ARG       Verifier error handling mode
                            (default: ThrowOnAnyFailure)
   -r,--rescopemode ARG     Variable rescoping failure handling mode
                            (default: ThrowOnEqRescopeFailure)
   --skip-unnamed-functions Skip analysis of functions without symbols
-  --skip-divergent-control-flow
-                           <DEPRECATED>
-  --target-equiv-regs ARG  Compute an equivalence condition sufficient to
-                           establish equality on the given registers after the
-                           toplevel entrypoint returns. <DEPRECATED>
   --ignore-segments ARG    Skip segments (0-indexed) when loading ELF
   --json-toplevel          Run toplevel in JSON-output mode (interactive mode
                            only)
@@ -95,8 +85,6 @@ The verifier accepts the following command line arguments::
   --ignore-warnings ARG    Don't raise any of the given warning types
   --always-classify-return Always resolve classifier failures by assuming
                            function returns, if possible.
-  --prefer-text-input      Prefer taking text input over multiple choice menus
-                           where possible.
   --add-trace-constraints  Prompt to add additional constraints when generating
                            traces.
   --quickstart             Start analysis immediately from the given entrypoint
@@ -126,8 +114,6 @@ To make use of the verifier with Docker, it is useful to map a directory on your
              -v `pwd`/VerifierData`:/VerifierData pate \
              --original /VerifierData/original.exe \
              --patched /VerifierData/patched.exe \
-             --proof-summary-json /VerifierData/report.json \
-             --log-file /VerifierData/pate.log \
              --save-macaw-cfgs /VerifierData/cfgs
 
 This command will run the verifier on the two binaries and drop you into
