@@ -532,7 +532,6 @@ class PateCfarExitDialog(QDialog):
 class PateCfarEqCondDialog(QDialog):
     def __init__(self, cfarNode,
                  conditionTrace: pate.ConditionTrace,
-                 allowTraceConstraint=False,
                  label: str = 'Condition',
                  parent=None):
         super().__init__(parent)
@@ -576,7 +575,7 @@ class PateCfarEqCondDialog(QDialog):
             # Live Mode
             traceConstraintButton = QPushButton("Constrain Trace")
         traceConstraintButton.clicked.connect(lambda _: self.showTraceConstraintDialog())
-        traceConstraintButton.setEnabled(allowTraceConstraint)
+        traceConstraintButton.setEnabled(self.conditionTrace.can_constrain())
 
         # Diff Mode Control
         diffModeLabel = QLabel("Difference mode:")
@@ -1438,7 +1437,6 @@ class MyFlowGraphWidget(FlowGraphWidget):
     def showCfarEqCondDialog(self, cfarNode: pate.CFARNode):
         d = PateCfarEqCondDialog(cfarNode,
                                  cfarNode.equivalenceConditionTrace,
-                                 allowTraceConstraint=True,
                                  label='Equivalence Condition',
                                  parent=self)
         d.show()
