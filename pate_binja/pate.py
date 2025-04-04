@@ -695,8 +695,19 @@ class PateWrapper:
         # TODO: infrastructure to do this in the background on same thread as command loop
         with io.StringIO() as out:
             # input "[ [ { \"var\" : { \"symbolic_ident\" : 0 }, \"op\" : \"EQ\", \"const\" : \"128\"} ] ]"
-            # TODO: Handle multiple nodes in final result
             out.write(r'input "[')
+            for i in range(cfarNode.equivalenceConditionTrace.trace_index):
+              # the API allows for constraining all nodes at the same time, by sending
+              # multiple lists. 
+              # we only want to constrain one condition at a time, so we need to make sure
+              # it appears in the correct position in the list
+              # e.g. given a final result of [eq_cond1, eq_cond2, eq_cond3, eq_cond4] 
+              # (the equivalence conditions in the "toplevel result" in the order they appeared, processed
+              # by processFinalResult ), 
+              # if we're sending a constraint
+              # for eq_cond3 we send: input "[ [], [], [{symbolic_ident:N, ...}, {symbolic_ident:M, ...}]  ]"
+              # note that we don't need to add lists afterwards to make the lengths match, they are assumed empty
+              out.write(r'[],')
             # TODO: Handle multiple eq conds
             out.write(r'[')
             for i, tc in enumerate(traceConstraints):
