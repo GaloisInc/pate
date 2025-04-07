@@ -323,6 +323,7 @@ cliOptions = OA.info (OA.helper <*> parser)
       (  OA.long "nodiscovery"
       <> OA.short 'd'
       <> OA.help "Don't dynamically discover function pairs based on calls."
+      <> OA.internal -- DEPRECATED
       ))
     <*> OA.option OA.auto (OA.long "solver"
                     <> OA.help "The SMT solver to use to solve verification conditions. One of CVC4, Yices, or Z3"
@@ -394,6 +395,7 @@ cliOptions = OA.info (OA.helper <*> parser)
         ( OA.long "proof-summary-json"
         <> OA.metavar "FILE"
         <> OA.help "A file to save interesting proof results to in JSON format"
+        <> OA.internal -- DEPRECATED
         ))
     <*> OA.optional (OA.strOption
         ( OA.long "log-file"
@@ -409,10 +411,12 @@ cliOptions = OA.info (OA.helper <*> parser)
    <*> OA.switch
        (  OA.long "skip-divergent-control-flow"
        <> OA.help "<DEPRECATED>"
+       <> OA.internal -- DEPRECATED
        )
     <*> OA.many (OA.strOption
         ( OA.long "target-equiv-regs"
         <> OA.help "Compute an equivalence condition sufficient to establish equality on the given registers after the toplevel entrypoint returns. <DEPRECATED>"
+        <> OA.internal -- DEPRECATED
         ))
     <*> OA.many (OA.option OA.auto
         ( OA.long "ignore-segments"
@@ -421,6 +425,7 @@ cliOptions = OA.info (OA.helper <*> parser)
    <*> OA.switch
        (  OA.long "json-toplevel"
        <> OA.help "Run toplevel in JSON-output mode (interactive mode only)"
+       <> OA.hidden -- only for binja plugin
        )
     <*> OA.many (OA.option OA.auto
         ( OA.long "read-only-segments"
@@ -429,7 +434,10 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.optional (OA.strOption
          ( OA.long "script"
          <> OA.metavar "FILENAME"
-         <> OA.help "Save macaw CFGs to the provided directory"
+         <> OA.help (
+                 "Path to a pate script file. Provides pre-defined input for user prompts" 
+              ++ " (see tests/integration/packet-mod/packet.pate for an example and"
+              ++ " src/Pate/Script.hs for details)" )
          ))
     <*> OA.switch
          ( OA.long "assume-stack-scope"
@@ -446,6 +454,7 @@ cliOptions = OA.info (OA.helper <*> parser)
     <*> OA.switch
          ( OA.long "prefer-text-input"
          <> OA.help "Prefer taking text input over multiple choice menus where possible."
+         <> OA.internal -- deprecated (mostly unsupported)
          )
     <*> OA.switch
          ( OA.long "add-trace-constraints"

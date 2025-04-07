@@ -9,14 +9,14 @@ The user makes a selection by entering a number representing the node of interes
 
 \subsection{Example Usage}
 
-Launch \pate{} on the binaries in the \texttt{tests/integration/packet/exe/} directory with:
+Launch \pate{} on the binaries in the \texttt{tests/integration/packet/} directory with:
 
 \begin{verbatim}
    docker run --rm -it \
      --platform linux/amd64 \
-     -v "$(pwd)"/tests/integration/packet/exe:/target \
+     -v "$(pwd)"/tests/integration/packet:/target \
      pate \
-     --original /target/packet.exe \
+     --original /target/packet.original.exe \
      --patched /target/packet.patched.exe \
      -s parse_packet
  \end{verbatim}
@@ -25,7 +25,7 @@ Once launched, \pate{} presents the user is presented with a list of entry point
 \begin{lstlisting}
   Choose Entry Point
   0: Function Entry "_start" (segment1+0x435)
-  1: Function Entry "parse_packet" (segment1+0x554)
+  1: Function Entry "parse_packet" (segment1+0x590)
   ?> |\colorbox{yellow}{1}|
 \end{lstlisting}
 
@@ -34,30 +34,37 @@ Here the user enters \texttt{1}, selecting \texttt{parse\_packet}.
 This starts \pate{}'s analysis at this point, and the user sees output of:
 
 \begin{lstlisting}
-...........
-0: Function Entry "parse_packet" (segment1+0x554) (User Request).........
-1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains).........
-2: segment1+0x5ac [ via: "parse_packet" (segment1+0x554) ]
+..
+0: Function Entry "parse_packet" (segment1+0x590) (User Request)
+1: segment1+0x5c0 [ via: "parse_packet" (segment1+0x590) ] 
    (Widening Equivalence Domains)
-3: Return "parse_packet" (segment1+0x554)
-   (Widening Equivalence Domains)........
-4: segment1+0x5cc [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains).........
-5: segment1+0x5e0 [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains)........
-6: segment1+0x600 [ via: "parse_packet" (segment1+0x554) ]
+2: segment1+0x600 [ via: "parse_packet" (segment1+0x590) ] 
    (Widening Equivalence Domains)
-7: Return "parse_packet" (segment1+0x554)
-   (Widening Equivalence Domains).........
-8: segment1+0x624 [ via: "parse_packet" (segment1+0x554) ]
-   (Widening Equivalence Domains).........
+3: Return "parse_packet" (segment1+0x590) 
+   (Widening Equivalence Domains)
+4: segment1+0x63c [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+5: segment1+0x658 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+6: segment1+0x698 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+7: segment1+0x6d8 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+8: Function Entry "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+9: Return "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+10: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
 Handle observable difference:
-0: Emit warning and continue
-1: Assert difference is infeasible (defer proof)
-2: Assert difference is infeasible (prove immediately)
-3: Assume difference is infeasible
-4: Avoid difference with equivalence condition
+0: Emit warning and continue 
+1: Assert difference is infeasible (defer proof) 
+2: Assert difference is infeasible (prove immediately) 
+3: Assume difference is infeasible 
+4: Avoid difference with equivalence condition 
+5: Avoid difference with path-sensitive equivalence condition
 ?> |\colorbox{yellow}{4}|
 \end{lstlisting}
 
@@ -67,128 +74,188 @@ Each pair of address and calling contexts defines a unique toplevel proof ``node
 A given address and context may appear multiple times in the toplevel list, corresponding to each individual time that the address/context pair was analyzed.
 The latest (highest-numbered) entry corresponds to the most recent analysis of an address/context.
 
-Each entry point is associated with an equivalence domain: a set of locations (registers, stack slots and memory addresses) that are potentially not equal at this point.
-Locations outside of this set have been proven to be equal (ignoring skipped functions).
-The analysis takes the equivalence domain of an entry point and computes an equivalence domain for each possible exit point (according to the semantics of the block).
+Each entry is associated with an equivalence domain: a set of locations (registers, stack slots and memory addresses) that are potentially not equal at this point.
+Locations outside this set have been proven to be equal (ignoring skipped functions).
+The analysis takes the equivalence domain of an address/context pair and computes an equivalence domain for each possible exit (according to the semantics of the block).
 
 At this point in the example, \pate{} is asking how a detected observable difference should be handled.
 The user selects \texttt{4} to capture the difference in the equivalence condition, and \pate{} continues its analysis:
 
 \begin{lstlisting}
-  0: Function Entry "parse_packet" (segment1+0x554) (User Request)
-  1: segment1+0x580 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  2: segment1+0x5ac [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  3: Return "parse_packet" (segment1+0x554)
-     (Widening Equivalence Domains)
-  4: segment1+0x5cc [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  5: segment1+0x5e0 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  6: segment1+0x600 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  7: Return "parse_packet" (segment1+0x554)
-     (Widening Equivalence Domains)
-  8: segment1+0x624 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  9: segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)........
-  10: segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
-     (Re-checking Block Exits)........
-  11: segment1+0x654 (original) vs. segment1+0x668 (patched)
-     [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)........
-  12: segment1+0x668 (original) vs. segment1+0x67c (patched)
-     [ via: "parse_packet" (segment1+0x554) ]
-     (Widening Equivalence Domains)
-  13: Return "parse_packet" (segment1+0x554)
-      (Widening Equivalence Domains)
-  Continue verification?
-  0: Finish and view final result
-  1: Restart from entry point
-  2: Handle pending refinements
-  ?> |\colorbox{yellow}{0}|
+0: Function Entry "parse_packet" (segment1+0x590) (User Request)
+1: segment1+0x5c0 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+2: segment1+0x600 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+3: Return "parse_packet" (segment1+0x590) 
+   (Widening Equivalence Domains)
+4: segment1+0x63c [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+5: segment1+0x658 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+6: segment1+0x698 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+7: segment1+0x6d8 [ via: "parse_packet" (segment1+0x590) ] 
+   (Widening Equivalence Domains)
+8: Function Entry "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+9: Return "check_crc" (segment1+0x530) 
+   [ via: "parse_packet" (segment1+0x6ec) ] 
+   (Widening Equivalence Domains)
+10: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+11: segment1+0x71c [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+12: segment1+0x71c [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Block Exits)
+13: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Propagating Conditions)
+14: segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Block Exits)
+15: Return "check_crc" (segment1+0x530) [ via: "parse_packet" (segment1+0x6ec) ] 
+    (Propagating Conditions)
+16: segment1+0x71c [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+17: Return "parse_packet" (segment1+0x590) (Widening Equivalence Domains)
+18: segment1+0x758 [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+19: Function Entry "parse_data" (segment1+0x558) 
+    [ via: "parse_packet" (segment1+0x774) ] 
+    (Widening Equivalence Domains)
+20: segment1+0x584 [ via: "parse_data" (segment1+0x558) 
+      <- "parse_packet" (segment1+0x774) ] 
+    (Widening Equivalence Domains)
+21: Return "parse_data" (segment1+0x558) 
+    [ via: "parse_packet" (segment1+0x774) ] 
+    (Widening Equivalence Domains)
+22: segment1+0x774 [ via: "parse_packet" (segment1+0x590) ] 
+    (Widening Equivalence Domains)
+23: Return "parse_packet" (segment1+0x590) 
+    (Widening Equivalence Domains)
+24: segment1+0x5c0 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+25: Return "parse_packet" (segment1+0x590) 
+    (Widening Equivalence Domains)
+26: segment1+0x600 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+27: segment1+0x658 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+28: segment1+0x698 [ via: "parse_packet" (segment1+0x590) ] 
+    (Re-checking Equivalence Domains)
+Continue verification?
+0: Finish and view final result 
+1: Restart from entry point 
+2: Handle pending refinements 
+?> |\colorbox{yellow}{0}|
 \end{lstlisting}
 
 The user selects \texttt{0} to finish and view the final result.
 
-The \pate{} analysis tree can be navigated by the user with \texttt{top} to move to the top of the tree, numbers to navigate ``into'' nodes, \texttt{up} to move ``up'' a node, and \texttt{ls} to redisplay the nodes available at a current level.
+The \pate{} analysis tree can be navigated by the user with \texttt{top} to move to the top of the tree, numbers to navigate ``into'' nodes, \texttt{up} to move ``up'' a node, and \texttt{ls} to re-display the nodes available at a current level.
 
-For example, to inspect the analysis results in the running example, the user may provide input as follows to view the equivalence condition:
+For example, to inspect the analysis results in the running example, the user may provide input as follows to view the equivalence condition(s):
 
 \begin{lstlisting}
   ...
-  15: Final Result
-  > |\colorbox{yellow}{15}|
+  30: Final Result
+  > |\colorbox{yellow}{30}|
   Final Result
   0: Assumed Equivalence Conditions
-  1:   segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
-  2: Binaries are conditionally, observably equivalent
-  3: Toplevel Result
-  > |\colorbox{yellow}{1}|
-  segment1+0x644 [ via: "parse_packet" (segment1+0x554) ]
+  1:   segment1+0x6ec [ via: "parse_packet" (segment1+0x590) ]
+  2:   segment1+0x71c [ via: "parse_packet" (segment1+0x590) ]
+  3: Binaries are conditionally, observably equivalent
+  4: Toplevel Result
+  > |\colorbox{yellow}{2}|
+  segment1+0x71c [ via: "parse_packet" (segment1+0x590) ]
   0: ------
   1:   original
   2:   patched
-  3: let -- segment1+0x684.. in not v40494
+  3: (Predicate) let -- segment1+0x734.. in not (and v67142 (not v67145))
+  4: With condition assumed
+  5:   Event Trace: segment1+0x71c .. segment1+0x754
+  6: With negation assumed
+  7:   Event Trace: segment1+0x71c .. segment1+0x754
+  8: Simplified Predicate
   > |\colorbox{yellow}{3}|
-  let -- segment1+0x684
-      v40487 = select (select cInitMemBytes@40467:a 0) 0x11045:[32]
-      -- segment1+0x684
-      v40490 = select (select cInitMemBytes@40344:a 0) 0x11044:[32]
-      -- segment1+0x684
-      v40494 = and (eq 0x80:[8] v40487) (not (eq v40490 (bvSum v40487 0x80:[8])))
-   in not v40494
-  0: With condition assumed
-  1:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
-       segment1+0x644 .. segment1+0x664 (patched)
-  2: With negation assumed
-  3:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
-       segment1+0x644 .. segment1+0x664 (patched)
-  >
+  let -- segment1+0x734
+    v67145 = eq 0x0:[8] (select (select cInitMemBytes@66997:a 0) 0x11044:[32])
+    -- segment1+0x734
+    v67142 = eq 0x80:[8] (select (select cInitMemBytes@67121:a 0) 0x11045:[32])
+ in not (and v67142 (not v67145))
 \end{lstlisting}
+
+This is a formal representation of an equivalence condition calculated by \pate{}, which is the result of the user
+choosing to ``avoid'' the detected observable difference. The condition is a predicate over the (symbolic) original and patched program
+states starting at a given address/context (in this case, starting at \texttt{0x71c} within the \texttt{parse\_packet} function).
+In the Binary Ninja plugin (see~\ref{sec:binary-ninja-ui}) this predicate is post-processed to be more human-readable.
 
 Continuing on, the user may view, for example, an example trace showing where the equivalence condition above does not hold:
 
 \begin{lstlisting}
-  0: With condition assumed
-  1:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
-       segment1+0x644 .. segment1+0x664 (patched)
-  2: With negation assumed
-  3:   Event Trace: segment1+0x644 .. segment1+0x650 (original) vs.
-       segment1+0x644 .. segment1+0x664 (patched)
-  > |\colorbox{yellow}{3}|
+  > |\colorbox{yellow}{up}|
+  ...
+  4: With condition assumed
+  5:   Event Trace: segment1+0x71c .. segment1+0x754
+  6: With negation assumed
+  7:   Event Trace: segment1+0x71c .. segment1+0x754
+  ...
+  > |\colorbox{yellow}{7}|
   == Initial Original Registers ==
-  pc <- 0x644:[32]
+  pc <- 0x71c:[32]
   r0 <- 0x0:[32]
   r1 <- 0x1:[32]
-  r10 <- (3243, 0x0:[32])
-  r11 <- (3342, 0x0:[32])
-  r12 <- (2490, 0x0:[32])
+  r11 <- Stack Slot: -8
+  r13 <- Stack Slot: -24
+  r14 <- 0x71c:[32]
+  r2 <- 0x1:[32]
   ...
   == Original sequence ==
-  (segment1+0x644)
-    Read 0x688:[32] -> 0x108:[32]
-    r0 <- 0x108:[32]
-  (segment1+0x648) r0 <- 0x758:[32]
+  ...
+  (segment1+0x724)
+    Read 0x11044:[32] -> 0x80:[8] 
+    r0 <- 0x80:[32]
+  (segment1+0x728) Write Stack Slot: -21 <- 0x80:[8] 
+  ...
+  (segment1+0x734)
+    Read 0x11045:[32] -> 0x80:[8] 
+    r0 <- 0x80:[32]
+  ...
+  (segment1+0x748)
+  Read Stack Slot: -21 -> 0x80:[8] 
+  r1 <- 0x80:[32]
   ...
   == Initial Patched Registers ==
-  pc <- 0x644:[32]
+  pc <- 0x71c:[32]
   r0 <- 0x0:[32]
   r1 <- 0x1:[32]
-  r10 <- (3243, 0x0:[32])
-  r11 <- (3342, 0x0:[32])
-  r12 <- (2490, 0x0:[32])
+  r11 <- Stack Slot: -8
+  r13 <- Stack Slot: -24
+  r14 <- 0x71c:[32]
+  r2 <- 0x1:[32]
   ...
   == Patched sequence ==
-  (segment1+0x644)
-    Read 0x11044:[32] -> 0x80:[8]
-    r1 <- 0x80:[32]
-  (segment1+0x648)
-    Read 0x11045:[32] -> 0x80:[8]
-    r2 <- 0x80:[32]
+  ...
+  (segment1+0x724)
+    Read 0x11044:[32] -> 0x80:[8] 
+    r0 <- 0x80:[32]
+  (segment1+0x728) Write Stack Slot: -21 <- 0x80:[8] 
+  ...
+  (segment1+0x734)
+    Read 0x11045:[32] -> 0x80:[8] 
+    r0 <- 0x80:[32]
+  ...
+  (segment1+0x744) Write Stack Slot: -21 <- 0x0:[8] 
+  (segment1+0x748)
+    Read Stack Slot: -21 -> 0x0:[8] 
+    r1 <- 0x0:[32]
+  ...
 \end{lstlisting}
+
+Here \pate{} has constructed a trace where memory addresses \texttt{0x11044} and \texttt{0x11045} are both assumed
+to contain \texttt{0x80} (negating the equivalence condition), and shown that this leads to a different value
+assigned to stack slot \texttt{-21}. This slot is provided as input to a subsequent call to \texttt{printf} and is 
+therefore considered an observable difference.
 
 See the following subsections for details about how to interpret and interact with the terminal user interface.
 

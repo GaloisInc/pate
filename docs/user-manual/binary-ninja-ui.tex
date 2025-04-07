@@ -84,7 +84,7 @@ When \pate{} analysis is complete (via interaction in the bottom portion), the \
 Default-colored rectangles represent a pair of programs slices that were able to matched up between the original and patched binary.
 Green rectangles represent slices present only in the original program, if any.
 Blue rectangles represent slices present only in the patched program, if any.
-Right click on a rectangle for options to jump directly to the relevant program location in the appropriate tab for the corresponding binary.
+Right-click on a rectangle for options to jump directly to the relevant program location in the appropriate tab for the corresponding binary.
 
 A red rectangle represents the ``active'' region, where \pate{} has found an equivalence condition.
 Right click and select ``Show Equivalence Condition'' to open the Equivalence Condition window.
@@ -104,7 +104,7 @@ An equivalence condition window includes:
   \label{fig:equiv-cond}
 \end{figure}
 
-Right clicking on a rectangle in the \pate{} analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
+Right-clicking on a rectangle in the \pate{} analysis graph and selecting ``Show Instruction Trees'' will open a new window showing basic blocks from the original program on the left and corresponding basic blocks from the patched program on the right.
 At the bottom will be a linearized representation of the instruction trees in the original and patched program, with colorized diff view.
 Instructions conditionally reachable through conditional control flow edges (if any) are prefixed by \texttt{+} or \texttt{-} to differentiate instructions in distinct branches.
 See Figure~\ref{fig:mcad} for an example of the instruction tree view, with MCAD integration (described below).
@@ -115,15 +115,8 @@ The concretized traces shown in the equivalence condition window (see Figure~\re
 through the program slices where the equivalence condition is either met or not met. In general there may be multiple paths through
 the program that may satisfy (or contradict) the equivalence condition. To observe alternative concrete traces, the final equivalence
 condition may be provided \emph{trace constraints}, which restrict the values that \pate{} may choose when generating a concrete trace.
-When viewing the final equivalence condition, after the verifier has finished and the user has requested the final result, the window
-shows an additional button at the bottom that allows for providing constraints to the given trace (see Figure~\ref{fig:equiv-cond-full}).
-
-\begin{figure}[h]
-  \centering
-  \includegraphics[width=0.95\textwidth]{pate-binja-traces1.png}
-  \caption{Equivalence condition window with button to constrain trace.}
-  \label{fig:equiv-cond-full}
-\end{figure}
+When viewing the final equivalence condition, after the verifier has finished and the user has requested the final result, the ``Constrain Trace'' 
+button at the bottom becomes enabled, allowing constraints to be added to the given trace.
 
 When ``Constrain Trace'' is clicked, the ``Trace Constraint'' window (see Figure~\ref{fig:trace-constr-empty}) appears. The
 ``Variable'' dropdown is populated with the memory reads from both the original and patched programs. Notably each read
@@ -168,7 +161,7 @@ That is, the user cannot deviate from the pre-recorded responses from the \pate{
 \subsection{MCAD Integration}
 
 MCAD\footnote{\url{https://github.com/securesystemslab/LLVM-MCA-Daemon}} is a performance analysis tool that performs static prediction of instruction timings for sequences of instructions such as those identified by \pate{}.
-The details of the MCAD system is outside of the scope of this user guide, but if the MCAD Docker container is available, the \pate{} Binary Ninja plugin will show MCAD-predicted cycle counts next to each instruction in the Instruction Trees view, as shown in Figure~\ref{fig:mcad}.
+The details of the MCAD system is outside the scope of this user guide, but if the MCAD Docker container is available, the \pate{} Binary Ninja plugin will show MCAD-predicted cycle counts next to each instruction in the Instruction Trees view, as shown in Figure~\ref{fig:mcad}.
 Use the \pate{} plugin preference option ``MCAD Docker image name'' to specify the name of the MCAD Docker container on the host in order to enable MCAD integration in the \pate{} plugin.
 
 \begin{figure}[h]
